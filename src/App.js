@@ -1,11 +1,5 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 
-/**
- * Fluxo industrial — V1.3
- * Fix: ao desligar a ESTEIRA DIREITA, a ESQUERDA não desliga imediatamente.
- *      Se a irmã estiver em AUTO, recebe timer de 15s; os processos acima continuam desligando.
- */
-
 // -----------------------------
 // Modelo de Estado
 // -----------------------------
@@ -15,6 +9,11 @@ const MODE = {
   MANUAL: "manual",
   AUTO: "auto",
   DEFECT: "defect",
+};
+
+const GROUP_MODE = {
+  AUTO: "auto",
+  MANU: "manu",
 };
 
 const ORDER = [
@@ -29,14 +28,14 @@ const ORDER = [
 ];
 
 const LABELS = {
-  esteiraMain: "Esteira Principal",
-  moedorMotorA: "Moedor - Motor A",
-  moedorMotorB: "Moedor - Motor B",
-  canoUnderMotor: "Cano (abaixo do moedor)",
-  esteiraUnderCano: "Esteira abaixo do cano",
-  separador: "Separador",
-  esteiraEsquerda: "Esteira → Esquerda",
-  esteiraDireita: "Esteira → Direita",
+  esteiraMain: "TC01",
+  moedorMotorA: "MM01M1",
+  moedorMotorB: "MM01M2",
+  canoUnderMotor: "VR01",
+  esteiraUnderCano: "TC02",
+  separador: "CV01",
+  esteiraEsquerda: "TC03",
+  esteiraDireita: "TC04",
 };
 
 // -----------------------------
@@ -54,11 +53,18 @@ function makeInitialState() {
 function SystemProvider({ children }) {
   const [state, setState] = useState(makeInitialState());
   const [timers, setTimers] = useState({}); // { [unitKey]: secondsRemaining }
+  const [groupMode, setGroupMode] = useState(GROUP_MODE.AUTO); // Grupo AUTO/MANU
 
-  useInterlocks(state, setState, timers, setTimers);
+  useInterlocks(state, setState, timers, setTimers, groupMode);
 
-  const actions = useMemo(() => createActions(state, setState, timers, setTimers), [state, timers]);
-  const value = useMemo(() => ({ state, actions, timers }), [state, actions, timers]);
+  const actions = useMemo(
+    () => createActions(state, setState, timers, setTimers, groupMode, setGroupMode),
+    [state, timers, groupMode]
+  );
+  const value = useMemo(
+    () => ({ state, actions, timers, groupMode }),
+    [state, actions, timers, groupMode]
+  );
   return <SystemContext.Provider value={value}>{children}</SystemContext.Provider>;
 }
 
@@ -101,10 +107,10 @@ function immediateDownstream(key) {
 }
 
 // -----------------------------
-// Ações (cliques)
+// Ações (cliques) + Grupo
 // -----------------------------
 
-function createActions(state, setState, timers, setTimers) {
+function createActions(state, setState, timers, setTimers, groupMode, setGroupMode) {
   const isOn = (k) => isOnMode(state[k]);
   const isDefect = (k) => state[k] === MODE.DEFECT;
 
@@ -123,8 +129,9 @@ function createActions(state, setState, timers, setTimers) {
     });
   const clearTimer = (key) => setTimers((t) => { const n = { ...t }; delete n[key]; return n; });
   const clearTimersFor = (keys) => setTimers((t) => { const n = { ...t }; keys.forEach((k) => delete n[k]); return n; });
+  const clearAllTimers = () => setTimers({});
 
-  // Bloqueios
+  // Interlock helpers (AUTO)
   const hasDefectBelow = (key) => downstreamOf(key).some((k) => isDefect(k));
   const hasSiblingDefectBlockException = (key) => key === FINAL_LEFT || key === FINAL_RIGHT;
 
@@ -138,12 +145,18 @@ function createActions(state, setState, timers, setTimers) {
     return updates;
   };
 
-  const cancelTimersDownstream = (key) => {
-    const ds = downstreamOf(key);
-    clearTimersFor(ds);
+  // força AUTO em toda a cadeia a jusante (exceto DEFECT)
+  const forceAutoDownstream = (key) => {
+    const updates = {};
+    for (const k of downstreamOf(key)) {
+      if (state[k] !== MODE.DEFECT) updates[k] = MODE.AUTO;
+    }
+    return updates;
   };
 
-  // Desliga SOMENTE ACIMA (exclui a irmã de esteira final) — FIX V1.3
+  const cancelTimersDownstream = (key) => clearTimersFor(downstreamOf(key));
+
+  // Desliga SOMENTE ACIMA (exclui a irmã de esteira final)
   const offAboveImmediate = (key) => {
     const updates = {};
     for (const k of upstreamOf(key)) {
@@ -161,7 +174,87 @@ function createActions(state, setState, timers, setTimers) {
     if (next.length) addTimers(next);
   };
 
+  // ---------- Grupo: mudar AUTO/MANU (todos OFF) ----------
+  const setGroupModeAllOff = (nextMode) => {
+    setGroupMode(nextMode);
+    clearAllTimers();
+    setState((s) => {
+      const n = { ...s };
+      ORDER.forEach((k) => {
+        if (n[k] !== MODE.DEFECT) n[k] = MODE.OFF; // mantém defeitos
+      });
+      return n;
+    });
+  };
+
+  // ---------- Grupo: Ligar / Desligar (requer AUTO) ----------
+  const groupPowerOn = () => {
+    // só faz sentido com interlocks
+    if (groupMode !== GROUP_MODE.AUTO) return;
+    // não liga se houver defeito a jusante (comportamento consistente com clique de TC01)
+    if (hasDefectBelow("esteiraMain")) return;
+
+    const updates = {
+      ...forceAutoDownstream("esteiraMain"),
+      esteiraMain: MODE.MANUAL,
+    };
+    // limpa timers pendentes e aplica
+    cancelTimersDownstream("esteiraMain");
+    clearTimer("esteiraMain");
+    bulk(updates);
+  };
+
+  const groupPowerOff = () => {
+    if (groupMode !== GROUP_MODE.AUTO) return;
+
+    // coloca cadeia a jusante em AUTO (para receber timers de desligamento)
+    const dsAuto = forceAutoDownstream("esteiraMain");
+
+    // desliga TC01 e agenda A/B imediatamente; o resto da cascata ocorre nos hooks
+    setState((s) => ({ ...s, ...dsAuto, esteiraMain: MODE.OFF }));
+    const first = immediateDownstream("esteiraMain").filter(
+      (k) => dsAuto[k] === MODE.AUTO || state[k] === MODE.AUTO
+    );
+    if (first.length) addTimers(first);
+    clearTimer("esteiraMain");
+  };
+
+  // ---------- Clique de botão por unidade ----------
+  // MANU: sem interlocks — com exceção dos moedores: ligar um liga os dois
+  const clickManualOnly = (key) => {
+    if (isDefect(key)) return;
+
+    if (key === "moedorMotorA" || key === "moedorMotorB") {
+      const self = key;
+      const other = key === "moedorMotorA" ? "moedorMotorB" : "moedorMotorA";
+      setState((s) => {
+        const nextSelf = s[self] === MODE.MANUAL ? MODE.OFF : MODE.MANUAL;
+        // ao LIGAR um moedor manualmente, liga também o outro
+        if (nextSelf === MODE.MANUAL) {
+          return { ...s, [self]: MODE.MANUAL, [other]: MODE.MANUAL };
+        }
+        // ao desligar, somente o clicado
+        return { ...s, [self]: MODE.OFF };
+      });
+      clearTimer(key);
+      return;
+    }
+
+    // Demais estágios: apenas alterna o próprio
+    setState((s) => {
+      const cur = s[key];
+      const next = cur === MODE.MANUAL ? MODE.OFF : MODE.MANUAL;
+      return { ...s, [key]: next };
+    });
+    clearTimer(key);
+  };
+
   const clickButton = (key) => {
+    if (groupMode === GROUP_MODE.MANU) {
+      return clickManualOnly(key);
+    }
+
+    // --- AUTO (comportamento interlock original)
     if (isDefect(key)) return;
 
     if (!isOn(key)) {
@@ -184,9 +277,6 @@ function createActions(state, setState, timers, setTimers) {
     }
 
     if (key === "moedorMotorA" || key === "moedorMotorB") {
-      const other = key === "moedorMotorA" ? "moedorMotorB" : "moedorMotorA";
-      if (!isOn(key) && isDefect(other)) return;
-
       const anyOn = isOn("moedorMotorA") || isOn("moedorMotorB");
       if (anyOn) {
         bulk({ moedorMotorA: MODE.OFF, moedorMotorB: MODE.OFF });
@@ -195,7 +285,11 @@ function createActions(state, setState, timers, setTimers) {
         offAboveImmediate("moedorMotorA");
         scheduleNextDownstream("moedorMotorA");
       } else {
-        bulk({ ...autoDownstreamAll("moedorMotorA"), moedorMotorA: MODE.MANUAL, moedorMotorB: MODE.MANUAL });
+        bulk({
+          ...autoDownstreamAll("moedorMotorA"),
+          moedorMotorA: MODE.MANUAL,
+          moedorMotorB: MODE.MANUAL,
+        });
         clearTimer("moedorMotorA");
         clearTimer("moedorMotorB");
         cancelTimersDownstream("moedorMotorA");
@@ -229,7 +323,7 @@ function createActions(state, setState, timers, setTimers) {
           if (state[sibling] === MODE.AUTO && !n[sibling]) n[sibling] = 15;
           return n;
         });
-        offAboveImmediate(key); // não derruba a irmã (fix)
+        offAboveImmediate(key); // não derruba a irmã
       } else {
         setMode(key, MODE.MANUAL);
         clearTimer(key);
@@ -248,7 +342,6 @@ function createActions(state, setState, timers, setTimers) {
       clearTimer(key);
       cancelTimersDownstream(key);
     }
-    return;
   };
 
   const toggleDefect = (key) => {
@@ -259,12 +352,12 @@ function createActions(state, setState, timers, setTimers) {
     }
 
     const wasOn = cur === MODE.MANUAL || cur === MODE.AUTO;
-    if (wasOn) {
+    if (wasOn && groupMode === GROUP_MODE.AUTO) {
       const nexts = immediateDownstream(key).filter((k) => state[k] === MODE.AUTO);
       if (nexts.length) addTimers(nexts);
     }
 
-    if (key === "moedorMotorA" || key === "moedorMotorB") {
+    if (groupMode === GROUP_MODE.AUTO && (key === "moedorMotorA" || key === "moedorMotorB")) {
       const other = key === "moedorMotorA" ? "moedorMotorB" : "moedorMotorA";
       if (state[other] !== MODE.DEFECT) {
         setMode(other, MODE.OFF);
@@ -272,33 +365,45 @@ function createActions(state, setState, timers, setTimers) {
       }
     }
 
-    offAboveImmediate(key);
+    if (groupMode === GROUP_MODE.AUTO) {
+      offAboveImmediate(key);
+    }
     clearTimer(key);
     setMode(key, MODE.DEFECT);
   };
 
-  return { clickButton, toggleDefect };
+  return {
+    clickButton,
+    toggleDefect,
+    setGroupModeAllOff,
+    groupPowerOn,
+    groupPowerOff,
+  };
 }
 
 // -----------------------------
 // Hook de Intertravamentos
 // -----------------------------
 
-function useInterlocks(state, setState, timers, setTimers) {
+function useInterlocks(state, setState, timers, setTimers, groupMode) {
+  const interlocksEnabled = groupMode === GROUP_MODE.AUTO;
+
   // Espelhamento dos moedores (sem defeito)
   useEffect(() => {
+    if (!interlocksEnabled) return;
     const a = state.moedorMotorA;
     const b = state.moedorMotorB;
     if (a === MODE.DEFECT || b === MODE.DEFECT) return;
     if (a !== b) {
-      const next = a === MODE.MANUAL || b === MODE.MANUAL
-        ? MODE.MANUAL
-        : a === MODE.AUTO || b === MODE.AUTO
-        ? MODE.AUTO
-        : MODE.OFF;
+      const next =
+        a === MODE.MANUAL || b === MODE.MANUAL
+          ? MODE.MANUAL
+          : a === MODE.AUTO || b === MODE.AUTO
+          ? MODE.AUTO
+          : MODE.OFF;
       setState((s) => ({ ...s, moedorMotorA: next, moedorMotorB: next }));
     }
-  }, [state.moedorMotorA, state.moedorMotorB, setState]);
+  }, [interlocksEnabled, state.moedorMotorA, state.moedorMotorB, setState]);
 
   // Tick de timers (1s)
   useEffect(() => {
@@ -331,7 +436,7 @@ function useInterlocks(state, setState, timers, setTimers) {
     return () => clearInterval(id);
   }, [timers, setTimers, setState]);
 
-  // Limpa qualquer timer ativo de peças que estejam OFF ou DEFECT
+  // Limpa timers de peças OFF/DEFECT
   useEffect(() => {
     setTimers((t) => {
       const n = { ...t };
@@ -346,9 +451,14 @@ function useInterlocks(state, setState, timers, setTimers) {
     });
   }, [state, setTimers]);
 
-  // Agendamento baseado em transições ON→OFF
+  // Agendamento baseado em transições ON→OFF (somente com interlocks habilitados)
   const prevRef = useRef(state);
   useEffect(() => {
+    if (!interlocksEnabled) {
+      prevRef.current = state;
+      return;
+    }
+
     const prev = prevRef.current;
     const wasOn = (k) => isOnMode(prev[k]);
     const isOffNow = (k) => state[k] === MODE.OFF;
@@ -357,7 +467,9 @@ function useInterlocks(state, setState, timers, setTimers) {
       if (wasOn(k) && isOffNow(k)) {
         if (k === "moedorMotorA" || k === "moedorMotorB") {
           if (state.moedorMotorA === MODE.OFF && state.moedorMotorB === MODE.OFF) {
-            setTimers((t) => (state.canoUnderMotor === MODE.AUTO && !t.canoUnderMotor ? { ...t, canoUnderMotor: 15 } : t));
+            setTimers((t) =>
+              state.canoUnderMotor === MODE.AUTO && !t.canoUnderMotor ? { ...t, canoUnderMotor: 15 } : t
+            );
           }
           return;
         }
@@ -374,9 +486,7 @@ function useInterlocks(state, setState, timers, setTimers) {
         if (nexts.length) {
           setTimers((t) => {
             const add = { ...t };
-            nexts.forEach((d) => {
-              if (!add[d]) add[d] = 15;
-            });
+            nexts.forEach((d) => { if (!add[d]) add[d] = 15; });
             return add;
           });
         }
@@ -385,7 +495,7 @@ function useInterlocks(state, setState, timers, setTimers) {
 
     ORDER.forEach(scheduleIfTurnedOff);
     prevRef.current = state;
-  }, [state, setTimers]);
+  }, [interlocksEnabled, state, setTimers]);
 }
 
 // -----------------------------
@@ -463,7 +573,12 @@ function ToggleButton({ unitKey }) {
   const disabled = mode === MODE.DEFECT;
 
   return (
-    <button onClick={() => actions.clickButton(unitKey)} className={buttonClasses(mode, disabled)} aria-pressed={mode === MODE.MANUAL || mode === MODE.AUTO} aria-disabled={disabled}>
+    <button
+      onClick={() => actions.clickButton(unitKey)}
+      className={buttonClasses(mode, disabled)}
+      aria-pressed={mode === MODE.MANUAL || mode === MODE.AUTO}
+      aria-disabled={disabled}
+    >
       <div className="flex items-center gap-3">
         <StatusDot mode={mode} />
         <span className="font-medium">{LABELS[unitKey]}</span>
@@ -485,7 +600,12 @@ function ProcessBadge({ unitKey }) {
   const mode = state[unitKey];
 
   return (
-    <div role="button" onClick={() => actions.toggleDefect(unitKey)} className={badgeClasses(mode)} title={mode === MODE.DEFECT ? "Clique para limpar defeito" : "Clique para marcar defeito"}>
+    <div
+      role="button"
+      onClick={() => actions.toggleDefect(unitKey)}
+      className={badgeClasses(mode)}
+      title={mode === MODE.DEFECT ? "Clique para limpar defeito" : "Clique para marcar defeito"}
+    >
       <div className="flex items-center gap-3">
         <StatusDot mode={mode} />
         <span className="font-medium">{LABELS[unitKey]}</span>
@@ -517,8 +637,8 @@ function ControlsList() {
       <ToggleButton unitKey="separador" />
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <ToggleButton unitKey={FINAL_LEFT} />
-        <ToggleButton unitKey={FINAL_RIGHT} />
+        <ToggleButton unitKey="esteiraEsquerda" />
+        <ToggleButton unitKey="esteiraDireita" />
       </div>
     </div>
   );
@@ -539,9 +659,93 @@ function VisualList() {
       <ProcessBadge unitKey="separador" />
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <ProcessBadge unitKey={FINAL_LEFT} />
-        <ProcessBadge unitKey={FINAL_RIGHT} />
+        <ProcessBadge unitKey="esteiraEsquerda" />
+        <ProcessBadge unitKey="esteiraDireita" />
       </div>
+    </div>
+  );
+}
+
+// -----------------------------
+// Seletor de Grupo (AUTO / MANU) + On/Off
+// -----------------------------
+
+function GroupSelector() {
+  const { groupMode, actions } = useSystem();
+  const isAuto = groupMode === GROUP_MODE.AUTO;
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4">
+      <h3 className="text-sm font-semibold mb-2">Grupo</h3>
+      <div className="flex gap-2">
+        <button
+          type="button"
+          aria-pressed={isAuto}
+          onClick={() => actions.setGroupModeAllOff(GROUP_MODE.AUTO)}
+          className={[
+            "px-3 py-1.5 rounded-xl border text-sm transition",
+            isAuto ? "bg-slate-900 text-white border-slate-900 shadow-sm" : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
+          ].join(" ")}
+        >
+          AUTO
+        </button>
+        <button
+          type="button"
+          aria-pressed={!isAuto}
+          onClick={() => actions.setGroupModeAllOff(GROUP_MODE.MANU)}
+          className={[
+            "px-3 py-1.5 rounded-xl border text-sm transition",
+            !isAuto ? "bg-slate-900 text-white border-slate-900 shadow-sm" : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"
+          ].join(" ")}
+        >
+          MANU
+        </button>
+      </div>
+      <p className="text-xs text-slate-500 mt-2">
+        AUTO: interlocks e timers habilitados • MANU: sem interlocks; cada clique atua somente no próprio componente. Ao trocar, todos ficam OFF.
+      </p>
+    </div>
+  );
+}
+
+function GroupPowerBox() {
+  const { actions, groupMode } = useSystem();
+  const disabled = groupMode !== GROUP_MODE.AUTO;
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4">
+      <h3 className="text-sm font-semibold mb-2">On/Off</h3>
+      <div className="flex gap-2">
+        <button
+          type="button"
+          onClick={actions.groupPowerOn}
+          disabled={disabled}
+          className={[
+            "px-3 py-1.5 rounded-xl border text-sm transition",
+            disabled ? "bg-white text-slate-400 border-slate-200 cursor-not-allowed"
+                     : "bg-green-600 text-white border-green-700 hover:bg-green-700"
+          ].join(" ")}
+        >
+          Ligar grupo
+        </button>
+        <button
+          type="button"
+          onClick={actions.groupPowerOff}
+          disabled={disabled}
+          className={[
+            "px-3 py-1.5 rounded-xl border text-sm transition",
+            disabled ? "bg-white text-slate-400 border-slate-200 cursor-not-allowed"
+                     : "bg-red-600 text-white border-red-700 hover:bg-red-700"
+          ].join(" ")}
+        >
+          Desligar grupo
+        </button>
+      </div>
+      {disabled && (
+        <p className="text-[11px] text-slate-500 mt-2">
+          Disponível apenas quando o Grupo estiver em <strong>AUTO</strong>.
+        </p>
+      )}
     </div>
   );
 }
@@ -556,21 +760,29 @@ export default function IndustrialFlowPanel() {
       <div className="min-h-screen w-full bg-gradient-to-b from-slate-50 to-slate-100 p-6">
         <main className="mx-auto max-w-5xl">
           <header className="mb-6">
-            <h1 className="text-2xl md:text-3xl font-bold tracking-tight">Fluxo Industrial (V1.3)</h1>
+            <h1 className="text-2xl md:text-3xl font-bold tracking-tight">Fluxo Industrial (V1.4)</h1>
             <p className="text-slate-600 mt-1">Interlocks completos • Timers só para AUTO • Defeitos persistentes • Cascata em defeito • Pares A/B e E/D</p>
+
+            {/* Grupo + On/Off lado a lado */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
+              <GroupSelector />
+              <GroupPowerBox />
+            </div>
           </header>
 
           <section className="grid grid-cols-1 md:grid-cols-2 gap-5 items-start">
-            <Card title="Controles (Botões)">
+            <Card title="Comandos">
               <ControlsList />
             </Card>
 
-            <Card title="Processos (Visuais)">
+            <Card title="Alarmes">
               <VisualList />
             </Card>
           </section>
 
-          <p className="text-slate-600 mt-6">Clique em um processo para marcar/limpar <strong>defeito</strong> (vermelho). O fluxo só pode ser ligado pelos botões.</p>
+          <p className="text-slate-600 mt-6">
+            Clique em um processo para marcar/limpar <strong>defeito</strong> (vermelho). O fluxo só pode ser ligado pelos botões.
+          </p>
         </main>
       </div>
     </SystemProvider>
