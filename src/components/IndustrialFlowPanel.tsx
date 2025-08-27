@@ -659,7 +659,7 @@ export default function IndustrialFlowPanel() {
       <div className="min-h-screen w-full bg-gradient-to-b from-slate-50 to-slate-100 p-6">
         <main className="mx-auto max-w-5xl">
           <header className="mb-6">
-            <h1 className="text-2xl md:text-3xl font-bold tracking-tight">Fluxo Industrial (V1.9 — Cascata Top→Down resiliente)</h1>
+            <h1 className="text-2xl md:text-3xl font-bold tracking-tight">Fluxo Industrial (V1.9)</h1>
             <p className="text-slate-600 mt-1">
               Interlocks no AUTO • Timers de 3s • Defeitos persistentes • Desligamento <em>de cima para baixo</em> • Ligar TC03/TC04 aciona toda a montante • Cascata mantém-se ao alternar Automático/Manual • Onda de desligamento continua mesmo com trechos já OFF
             </p>
