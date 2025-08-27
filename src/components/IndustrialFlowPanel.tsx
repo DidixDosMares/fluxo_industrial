@@ -107,7 +107,8 @@ function SystemProvider({ children }: { children: ReactNode }) {
         setGroupMode,
         setShutdownRun
       ),
-    [state, timers, groupMode, setShutdownRun]
+
+    [state, timers, groupMode, setShutdownRun, setGroupMode, setState, setTimers]
   );
 
   const value = useMemo<SystemContextValue>(
@@ -298,58 +299,70 @@ function useInterlocks(
     setState((s) => ({ ...s, moedorMotorA: next, moedorMotorB: next }));
   }, [interlocksEnabled, state.moedorMotorA, state.moedorMotorB, setState]);
 
-  // Tick de timers: desliga ON/AUTO, propaga downstream e “preenche lacunas” (nós OFF)
-  useEffect(() => {
-    if (!Object.keys(timers).length) return;
+// Tick de timers: desliga ON/AUTO, propaga downstream e “preenche lacunas” (nós OFF)
+useEffect(() => {
+  if (!Object.keys(timers).length) return;
 
-    const id = setInterval(() => {
-      setTimers((prev) => {
-        const nextBase: TimersRecord = {};
-        const toTurnOff: UnitKey[] = [];
+  const id = setInterval(() => {
+    setTimers((prev) => {
+      const nextBase: TimersRecord = {};
+      const toTurnOff: UnitKey[] = [];
 
-        for (const [k, v] of Object.entries(prev) as [UnitKey, number][]) {
-          const nv = v - 1;
-          nv <= 0 ? toTurnOff.push(k) : (nextBase[k] = nv);
+      // ✅ if/else no lugar de expressão “solta” (evita no-unused-expressions)
+      for (const [k, v] of Object.entries(prev) as [UnitKey, number][]) {
+        const nv = v - 1;
+        if (nv <= 0) {
+          toTurnOff.push(k);
+        } else {
+          nextBase[k] = nv;
         }
+      }
 
-        if (toTurnOff.length) {
-          setState((s) => {
-            const u = { ...s };
-            for (const k of toTurnOff) if (u[k] === MODE.MANUAL || u[k] === MODE.AUTO) u[k] = MODE.OFF;
-            return u;
-          });
-          const v = new Set(visitedRef.current);
-          toTurnOff.forEach((k) => v.add(k));
-          visitedRef.current = v;
-        }
-
-        let next: TimersRecord = { ...nextBase };
-
-        // Propaga para downstream quando um estágio “encerra”
-        if (shutdownRun && toTurnOff.length) {
+      if (toTurnOff.length) {
+        setState((s) => {
+          const u = { ...s };
           for (const k of toTurnOff) {
-            for (const d of immediateDownstream(k)) if (next[d] == null) next[d] = TIMER_SECONDS;
+            if (u[k] === MODE.MANUAL || u[k] === MODE.AUTO) u[k] = MODE.OFF;
+          }
+          return u;
+        });
+        // marca nós “processados” (para avançar mesmo em trechos OFF)
+        const v = new Set(visitedRef.current);
+        toTurnOff.forEach((k) => v.add(k));
+        visitedRef.current = v;
+      }
+
+      // ✅ 'const' em vez de 'let' (prefer-const)
+      const next: TimersRecord = { ...nextBase };
+
+      // Propaga para downstream quando um estágio “encerra”
+      if (shutdownRun && toTurnOff.length) {
+        for (const k of toTurnOff) {
+          for (const d of immediateDownstream(k)) {
+            if (next[d] == null) next[d] = TIMER_SECONDS;
           }
         }
+      }
 
-        // Se todos os montantes de um nó já foram processados e ele não tem timer, inicie-o.
-        if (shutdownRun) {
-          const visited = visitedRef.current;
-          const shouldStart: UnitKey[] = [];
-          for (const k of ORDER) {
-            if (visited.has(k) || next[k] != null) continue;
-            const ups = upstreamOf(k);
-            if (ups.every((u) => visited.has(u))) shouldStart.push(k);
-          }
-          shouldStart.forEach((k) => (next[k] = TIMER_SECONDS));
+      // “Preenche lacunas”: se todos os montantes de um nó foram processados e ele não tem timer, inicie-o
+      if (shutdownRun) {
+        const visited = visitedRef.current;
+        const shouldStart: UnitKey[] = [];
+        for (const k of ORDER) {
+          if (visited.has(k) || next[k] != null) continue;
+          const ups = upstreamOf(k);
+          if (ups.every((u) => visited.has(u))) shouldStart.push(k);
         }
+        shouldStart.forEach((k) => (next[k] = TIMER_SECONDS));
+      }
 
-        return next;
-      });
-    }, 1000);
+      return next;
+    });
+  }, 1000);
 
-    return () => clearInterval(id);
-  }, [timers, setTimers, setState, shutdownRun]);
+  return () => clearInterval(id);
+}, [timers, setTimers, setState, shutdownRun]);
+
 
   // Higiene: não limpar timers durante cascata (precisamos deles para avançar)
   useEffect(() => {
