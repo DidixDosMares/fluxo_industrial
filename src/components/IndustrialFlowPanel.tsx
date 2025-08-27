@@ -230,7 +230,6 @@ function createActions(
   const isDefect = (k: UnitKey) => state[k] === MODE.DEFECT;
 
   const bulk = (entries: Partial<StateRecord>) => setState((s) => ({ ...s, ...entries }));
-  const setMode = (k: UnitKey, m: Mode) => setState((s) => ({ ...s, [k]: m }));
 
   const addTimers = (keys: UnitKey[]) =>
     setTimers((t) => {
@@ -255,13 +254,13 @@ function createActions(
 
   // Não permitir troca de modo enquanto houver timers rodando
   const setGroupModeSafe = (nextMode: GroupMode) => {
-    if (hasActiveTimers()) return; // (3) bloqueia alternância com contadores ativos
+    if (hasActiveTimers()) return; // bloqueia alternância com contadores ativos
     setGroupMode(nextMode);
     if (nextMode === GROUP_MODE.AUTO) {
-      // (5) MANUAL -> AUTO: verdes -> amarelos, exceto TC03/TC04
+      // MANUAL -> AUTO: verdes -> amarelos, exceto TC03/TC04
       setState((s) => {
         const n: Partial<StateRecord> = {};
-        (ORDER as UnitKey[]).forEach((k) => {
+        ORDER.forEach((k) => {
           if (k === FINAL_LEFT || k === FINAL_RIGHT) return; // exceção
           if (s[k] === MODE.MANUAL) n[k] = MODE.AUTO;
         });
@@ -270,22 +269,21 @@ function createActions(
     }
   };
 
-  // Regras auxiliares de startup respeitando defeitos: um nó só pode ligar via AUTO/cascata
-  // se não houver nenhum defeito em sua própria cadeia downstream.
+  // Regras de startup respeitando defeitos: um nó só pode ligar via AUTO/cascata
+  // se não houver nenhum defeito em sua cadeia downstream.
   const canAutoStart = (k: UnitKey) => {
     if (state[k] === MODE.DEFECT) return false;
     const ds = downstreamOf(k);
     return !ds.some((d) => state[d] === MODE.DEFECT);
   };
 
-  // (1)+(2)+(5) Ligar em cascata de baixo pra cima:
-  // - finais (TC03/TC04) viram VERDE imediatamente (se não defeito)
-  // - nós acima ficam AMARELO e recebem TIMER em si mesmos (contador no próprio nó)
-  // - a cada 3s, o nó com timer vira VERDE e agenda o IMEDIATAMENTE ACIMA (como AMARELO + timer),
-  //   desde que não exista defeito abaixo dele.
+  // Ligar em cascata de baixo pra cima:
+  // - finais (TC03/TC04) verdes (se não defeito)
+  // - nós acima ficam AMARELO e recebem TIMER neles mesmos (contador no próprio nó)
+  // - a cada 3s, o nó com timer vira VERDE e agenda o imediatamente acima
   const groupPowerOn = () => {
     if (groupMode !== GROUP_MODE.AUTO) return;
-    if (hasActiveTimers()) return; // evita iniciar nova cascata com contadores ativos
+    if (hasActiveTimers()) return; // evita iniciar com contadores ativos
 
     setShutdownRun(false);
     setStartupRun(false);
@@ -296,16 +294,14 @@ function createActions(
     if (state[FINAL_LEFT] !== MODE.DEFECT) finalsOn[FINAL_LEFT] = MODE.MANUAL;
     if (state[FINAL_RIGHT] !== MODE.DEFECT) finalsOn[FINAL_RIGHT] = MODE.MANUAL;
 
-    // todos montantes ficam amarelos (quando permitido), mas o TIMER é colocado no nó que VAI mudar
+    // todos montantes amarelos (quando permitido) e timers no imediato acima dos finais
     const toAutoNow = new Set<UnitKey>();
     const toTimer: UnitKey[] = [];
 
     function seedAbove(finalKey: UnitKey) {
-      // tornar toda a montante AMARELA (se permitido) para visual, mas timer só no imediato acima
       for (const up of upstreamOf(finalKey)) {
         if (canAutoStart(up)) toAutoNow.add(up);
       }
-      // timer no imediato acima do final
       for (const u of immediateUpstream(finalKey)) {
         if (canAutoStart(u)) toTimer.push(u);
       }
@@ -324,7 +320,7 @@ function createActions(
     setStartupRun(!!toTimer.length);
   };
 
-  // Desligamento em cascata (mantém comportamento existente)
+  // Desligamento em cascata
   const groupPowerOff = () => {
     if (groupMode !== GROUP_MODE.AUTO) return;
     if (hasActiveTimers()) return;
@@ -360,10 +356,10 @@ function createActions(
 
   const clickButton = (key: UnitKey) => {
     if (groupMode === GROUP_MODE.AUTO) return;
-    return clickManualOnly(key); // (2) manual acima de defeito é permitido
+    return clickManualOnly(key);
   };
 
-  // (6) Ao marcar defeito, processos acima param imediatamente
+  // Ao marcar defeito, processos acima param imediatamente
   const toggleDefect = (key: UnitKey) => {
     if (groupMode === GROUP_MODE.AUTO) return;
     const willBeDefect = state[key] !== MODE.DEFECT;
@@ -493,7 +489,6 @@ function useInterlocks(
               const ds = downstreamOf(up);
               const hasDefectBelow = ds.some((d) => state[d] === MODE.DEFECT);
               if (state[up] !== MODE.DEFECT && !hasDefectBelow) {
-                // seta amarelo imediatamente para sinalizar que vai virar verde
                 setState((s) => ({ ...s, [up]: MODE.AUTO }));
                 if (next[up] == null) next[up] = TIMER_SECONDS;
               }
@@ -513,7 +508,8 @@ function useInterlocks(
     }, 1000);
 
     return () => clearInterval(id);
-  }, [timers, setTimers, setState, shutdownRun, startupRun, state]);
+  // 👇 Adicionados setShutdownRun e setStartupRun nas dependências
+  }, [timers, setTimers, setState, shutdownRun, startupRun, state, setShutdownRun, setStartupRun]);
 
   // Higiene: não limpar timers durante cascatas
   useEffect(() => {
@@ -778,7 +774,6 @@ function GroupSelector() {
         </button>
       </div>
       <p className="text-xs text-slate-500 mt-2">
-        {/* (5) texto solicitado */}
         Alternar entre Automático/Manual. Espere os contadores terminarem para alterar.
       </p>
     </div>
@@ -826,6 +821,10 @@ function GroupPowerBox() {
           Disponível apenas quando o Grupo estiver em <strong>AUTO</strong>.
         </p>
       )}
+
+      <p className="text-xs text-slate-500 mt-2">
+        Ao desligar grupo, não é exibido o contador de componentes desligados. Aguarde que todo o sistema será desligado.
+      </p>
     </div>
   );
 }
@@ -839,7 +838,7 @@ export default function IndustrialFlowPanel() {
         <main className="mx-auto max-w-5xl">
           <header className="mb-6">
             <h1 className="text-2xl md:text-3xl font-bold tracking-tight text-black">
-              Fluxo Industrial (V2.1)
+              Fluxo Industrial (V2.1.1)
             </h1>
             <p className="text-slate-700 mt-1">
               Painel de simulação com intertravamentos, timers de 3s e cascatas de liga/desliga (bottom-up / top-down), incluindo defeitos persistentes e espelhamento dos moedores.
