@@ -10,24 +10,14 @@ import React, {
   ReactNode,
 } from "react";
 
-/* =====================================================================
-   Tipos
-   ===================================================================== */
+/* ======================= Tipos e Constantes ======================= */
 
 type Mode = "off" | "manual" | "auto" | "defect";
 type GroupMode = "auto" | "manu";
 
-const MODE = {
-  OFF: "off",
-  MANUAL: "manual",
-  AUTO: "auto",
-  DEFECT: "defect",
-} as const;
-
-const GROUP_MODE = {
-  AUTO: "auto",
-  MANU: "manu",
-} as const;
+const MODE = { OFF: "off", MANUAL: "manual", AUTO: "auto", DEFECT: "defect" } as const;
+const GROUP_MODE = { AUTO: "auto", MANU: "manu" } as const;
+const TIMER_SECONDS = 3;
 
 const ORDER = [
   "esteiraMain",
@@ -40,8 +30,7 @@ const ORDER = [
   "esteiraDireita",
 ] as const;
 
-type UnitKey = typeof ORDER[number];
-
+type UnitKey = (typeof ORDER)[number];
 type StateRecord = Record<UnitKey, Mode>;
 type TimersRecord = Partial<Record<UnitKey, number>>;
 
@@ -56,9 +45,7 @@ const LABELS: Record<UnitKey, string> = {
   esteiraDireita: "TC04",
 };
 
-/* =====================================================================
-   Contexto Global do Sistema
-   ===================================================================== */
+/* ======================= Contexto do Sistema ======================= */
 
 interface Actions {
   clickButton: (key: UnitKey) => void;
@@ -83,6 +70,7 @@ function makeInitialState(): StateRecord {
   return s;
 }
 
+/** Estado persistido em localStorage */
 function useSavedState<T>(key: string, initial: T) {
   const [val, setVal] = useState<T>(() => {
     try {
@@ -104,8 +92,6 @@ function SystemProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useSavedState<StateRecord>("flow_state", makeInitialState());
   const [timers, setTimers] = useSavedState<TimersRecord>("flow_timers", {});
   const [groupMode, setGroupMode] = useSavedState<GroupMode>("flow_group_mode", GROUP_MODE.AUTO);
-
-  // Mantém a cascata viva após iniciar o desligamento
   const [shutdownRun, setShutdownRun] = useSavedState<boolean>("flow_shutdown_active", false);
 
   useInterlocks(state, setState, timers, setTimers, groupMode, shutdownRun, setShutdownRun);
@@ -138,9 +124,7 @@ function useSystem(): SystemContextValue {
   return ctx;
 }
 
-/* =====================================================================
-   Helpers
-   ===================================================================== */
+/* ======================= Helpers de Topologia ======================= */
 
 const idxOf = (k: UnitKey) => ORDER.indexOf(k);
 const upstreamOf = (key: UnitKey): UnitKey[] => ORDER.slice(0, idxOf(key)) as UnitKey[];
@@ -166,21 +150,17 @@ const isOnMode = (m: Mode) => m === MODE.MANUAL || m === MODE.AUTO;
 const FINAL_LEFT: UnitKey = "esteiraEsquerda";
 const FINAL_RIGHT: UnitKey = "esteiraDireita";
 
-/** Encontra todos os nós "topo ligado" (sem upstream ON) para iniciar cascata em todos os ramos */
+/** Sementes de desligamento: primeiros nós ON de cada ramo (sem montante ON) */
 function topmostOnSeeds(s: StateRecord): UnitKey[] {
   const seeds: UnitKey[] = [];
   for (const k of ORDER) {
-    const on = s[k] === MODE.MANUAL || s[k] === MODE.AUTO;
-    if (!on) continue;
-    const hasUpOn = upstreamOf(k).some((u) => s[u] === MODE.MANUAL || s[u] === MODE.AUTO);
-    if (!hasUpOn) seeds.push(k);
+    if (!isOnMode(s[k])) continue;
+    if (!upstreamOf(k).some((u) => isOnMode(s[u]))) seeds.push(k);
   }
   return seeds;
 }
 
-/* =====================================================================
-   Ações (cliques) + Grupo
-   ===================================================================== */
+/* ======================= Ações e Grupo ======================= */
 
 function createActions(
   state: StateRecord,
@@ -193,19 +173,13 @@ function createActions(
 ): Actions {
   const isDefect = (k: UnitKey) => state[k] === MODE.DEFECT;
 
-  const bulk = (entries: Partial<StateRecord>) =>
-    setState((s) => ({ ...s, ...entries }));
-  const setMode = (k: UnitKey, m: Mode) =>
-    setState((s) => ({ ...s, [k]: m }));
-
-  const TIMER_SECONDS = 3;
+  const bulk = (entries: Partial<StateRecord>) => setState((s) => ({ ...s, ...entries }));
+  const setMode = (k: UnitKey, m: Mode) => setState((s) => ({ ...s, [k]: m }));
 
   const addTimers = (keys: UnitKey[]) =>
     setTimers((t) => {
       const next: TimersRecord = { ...t };
-      keys.forEach((k) => {
-        next[k] = TIMER_SECONDS;
-      });
+      keys.forEach((k) => (next[k] = TIMER_SECONDS));
       return next;
     });
 
@@ -223,28 +197,21 @@ function createActions(
       return n;
     });
 
-  const setGroupModeSafe = (nextMode: GroupMode) => {
-    setGroupMode(nextMode);
-  };
+  const setGroupModeSafe = (nextMode: GroupMode) => setGroupMode(nextMode);
 
-  // Ligar grupo: liga TC03 e TC04 (MANUAL) e põe montante em AUTO
+  // Ao ligar o grupo: finais em MANUAL e montante em AUTO
   const autoUpstreamAll = (key: UnitKey): Partial<StateRecord> => {
     const updates: Partial<StateRecord> = {};
-    for (const k of upstreamOf(key)) {
-      if (state[k] !== MODE.DEFECT) updates[k] = MODE.AUTO;
-    }
+    for (const k of upstreamOf(key)) if (state[k] !== MODE.DEFECT) updates[k] = MODE.AUTO;
     return updates;
   };
-
   const cancelTimersUpstream = (key: UnitKey) => clearTimersFor(upstreamOf(key));
 
   const groupPowerOn = () => {
     if (groupMode !== GROUP_MODE.AUTO) return;
-    const upsLeft = autoUpstreamAll(FINAL_LEFT);
-    const upsRight = autoUpstreamAll(FINAL_RIGHT);
     bulk({
-      ...upsLeft,
-      ...upsRight,
+      ...autoUpstreamAll(FINAL_LEFT),
+      ...autoUpstreamAll(FINAL_RIGHT),
       [FINAL_LEFT]: MODE.MANUAL,
       [FINAL_RIGHT]: MODE.MANUAL,
     });
@@ -255,38 +222,33 @@ function createActions(
     setShutdownRun(false);
   };
 
-  // Desligar grupo: inicia cascata TOP→DOWN (3s) em TODOS os ramos "topo ligado"
+  // Desligamento: semear timers nas sementes de todos os ramos
   const groupPowerOff = () => {
     if (groupMode !== GROUP_MODE.AUTO) return;
-
     const seeds = topmostOnSeeds(state);
-    if (seeds.length === 0) return;
-
+    if (!seeds.length) return;
     setShutdownRun(true);
     addTimers(seeds);
   };
 
-  /* ---------------- Clique por unidade ------------------------ */
+  /** Clique manual: moedores espelhados; demais apenas alternam MANUAL/OFF */
   const clickManualOnly = (key: UnitKey) => {
     if (isDefect(key)) return;
 
     if (key === "moedorMotorA" || key === "moedorMotorB") {
       const self = key;
       const other: UnitKey = key === "moedorMotorA" ? "moedorMotorB" : "moedorMotorA";
-
       setState((s) => {
         const nextSelf = s[self] === MODE.MANUAL ? MODE.OFF : MODE.MANUAL;
         return { ...s, [self]: nextSelf, [other]: nextSelf };
       });
-
       clearTimer(key);
       clearTimer(other);
       return;
     }
 
     setState((s) => {
-      const cur = s[key];
-      const next: Mode = cur === MODE.MANUAL ? MODE.OFF : MODE.MANUAL;
+      const next: Mode = s[key] === MODE.MANUAL ? MODE.OFF : MODE.MANUAL;
       return { ...s, [key]: next };
     });
     clearTimer(key);
@@ -299,27 +261,13 @@ function createActions(
 
   const toggleDefect = (key: UnitKey) => {
     if (groupMode === GROUP_MODE.AUTO) return;
-
-    const cur = state[key];
-    if (cur === MODE.DEFECT) {
-      setMode(key, MODE.OFF);
-      return;
-    }
-    setMode(key, MODE.DEFECT);
+    setMode(key, state[key] === MODE.DEFECT ? MODE.OFF : MODE.DEFECT);
   };
 
-  return {
-    clickButton,
-    toggleDefect,
-    setGroupMode: setGroupModeSafe,
-    groupPowerOn,
-    groupPowerOff,
-  };
+  return { clickButton, toggleDefect, setGroupMode: setGroupModeSafe, groupPowerOn, groupPowerOff };
 }
 
-/* =====================================================================
-   Hook de Intertravamentos
-   ===================================================================== */
+/* ======================= Intertravamentos & Cascata ======================= */
 
 function useInterlocks(
   state: StateRecord,
@@ -331,126 +279,81 @@ function useInterlocks(
   setShutdownRun: React.Dispatch<React.SetStateAction<boolean>>
 ) {
   const interlocksEnabled = groupMode === GROUP_MODE.AUTO;
-  const TIMER_SECONDS = 3;
 
-  // ✅ NOVO: rastreia quais nós já foram "processados" na cascata (timer expirado)
+  // Nós “processados” (timer expirado) para a cascata avançar mesmo em trechos OFF
   const visitedRef = useRef<Set<UnitKey>>(new Set());
-  const shutdownWasOnRef = useRef<boolean>(false);
-
-  // Reseta 'visited' quando iniciamos uma cascata
+  const shutdownWasOnRef = useRef(false);
   useEffect(() => {
-    if (!shutdownWasOnRef.current && shutdownRun) {
-      visitedRef.current = new Set();
-    }
+    if (!shutdownWasOnRef.current && shutdownRun) visitedRef.current = new Set();
     shutdownWasOnRef.current = shutdownRun;
   }, [shutdownRun]);
 
-  // 1) Espelhamento dos moedores (apenas no AUTO e sem defeito)
+  // Espelhar moedores no AUTO (se ambos sem defeito)
   useEffect(() => {
     if (!interlocksEnabled) return;
     const a = state.moedorMotorA;
     const b = state.moedorMotorB;
-    if (a === MODE.DEFECT || b === MODE.DEFECT) return;
-    if (a !== b) {
-      const next: Mode =
-        a === MODE.MANUAL || b === MODE.MANUAL
-          ? MODE.MANUAL
-          : a === MODE.AUTO || b === MODE.AUTO
-          ? MODE.AUTO
-          : MODE.OFF;
-      setState((s) => ({ ...s, moedorMotorA: next, moedorMotorB: next }));
-    }
+    if (a === MODE.DEFECT || b === MODE.DEFECT || a === b) return;
+    const next: Mode = a === MODE.MANUAL || b === MODE.MANUAL ? MODE.MANUAL : a === MODE.AUTO || b === MODE.AUTO ? MODE.AUTO : MODE.OFF;
+    setState((s) => ({ ...s, moedorMotorA: next, moedorMotorB: next }));
   }, [interlocksEnabled, state.moedorMotorA, state.moedorMotorB, setState]);
 
-  // 2) Tick de timers (1s) — propaga downstream e preenche "lacunas" (OFF) pela fronteira visitada
+  // Tick de timers: desliga ON/AUTO, propaga downstream e “preenche lacunas” (nós OFF)
   useEffect(() => {
-    const hasTimers = Object.keys(timers).length > 0;
-    if (!hasTimers) return;
+    if (!Object.keys(timers).length) return;
 
     const id = setInterval(() => {
       setTimers((prev) => {
         const nextBase: TimersRecord = {};
         const toTurnOff: UnitKey[] = [];
 
-        // contagem regressiva
         for (const [k, v] of Object.entries(prev) as [UnitKey, number][]) {
           const nv = v - 1;
-          if (nv <= 0) {
-            toTurnOff.push(k);
-          } else {
-            nextBase[k] = nv;
-          }
+          nv <= 0 ? toTurnOff.push(k) : (nextBase[k] = nv);
         }
 
-        // Desliga peças ON/AUTO normalmente
         if (toTurnOff.length) {
           setState((s) => {
-            const updates = { ...s };
-            for (const key of toTurnOff) {
-              if (updates[key] === MODE.MANUAL || updates[key] === MODE.AUTO) {
-                updates[key] = MODE.OFF;
-              }
-            }
-            return updates;
+            const u = { ...s };
+            for (const k of toTurnOff) if (u[k] === MODE.MANUAL || u[k] === MODE.AUTO) u[k] = MODE.OFF;
+            return u;
           });
-        }
-
-        // ---- NOVO: marca nós "processados" (timer expirou)
-        if (shutdownRun && toTurnOff.length) {
           const v = new Set(visitedRef.current);
-          for (const k of toTurnOff) v.add(k);
+          toTurnOff.forEach((k) => v.add(k));
           visitedRef.current = v;
         }
 
-        // Construção do próximo mapa de timers
         let next: TimersRecord = { ...nextBase };
 
-        // (a) Propagação normal: quando um estágio "encerra", agenda downstream
+        // Propaga para downstream quando um estágio “encerra”
         if (shutdownRun && toTurnOff.length) {
-          for (const key of toTurnOff) {
-            for (const d of immediateDownstream(key)) {
-              if (next[d] == null) next[d] = TIMER_SECONDS;
-            }
+          for (const k of toTurnOff) {
+            for (const d of immediateDownstream(k)) if (next[d] == null) next[d] = TIMER_SECONDS;
           }
         }
 
-        // (b) ✅ NOVO: preenche "lacunas" — se todos os montantes de um nó já
-        // foram processados (visited), mas ele mesmo ainda não tem timer,
-        // iniciamos o timer dele para a cascata não "parar" em trechos OFF.
+        // Se todos os montantes de um nó já foram processados e ele não tem timer, inicie-o.
         if (shutdownRun) {
           const visited = visitedRef.current;
-          // Vamos agendar APENAS o próximo "nível" por tick
           const shouldStart: UnitKey[] = [];
           for (const k of ORDER) {
-            if (visited.has(k)) continue;     // já processado
-            if (next[k] != null) continue;    // já tem timer correndo
+            if (visited.has(k) || next[k] != null) continue;
             const ups = upstreamOf(k);
-            // Todos os montantes já processados?
-            const allUpsVisited = ups.every((u) => visited.has(u));
-            if (allUpsVisited) {
-              shouldStart.push(k);
-            }
+            if (ups.every((u) => visited.has(u))) shouldStart.push(k);
           }
-          // Agende somente o primeiro nível fronteira encontrado,
-          // preservando o ritmo top→down (3s entre etapas).
-          // (Todos os nós deste nível compartilham os mesmos montantes.)
-          if (shouldStart.length) {
-            for (const k of shouldStart) {
-              next[k] = TIMER_SECONDS;
-            }
-          }
+          shouldStart.forEach((k) => (next[k] = TIMER_SECONDS));
         }
 
         return next;
       });
     }, 1000);
+
     return () => clearInterval(id);
   }, [timers, setTimers, setState, shutdownRun]);
 
-  // 3) Higiene — não limpar timers durante cascata
+  // Higiene: não limpar timers durante cascata (precisamos deles para avançar)
   useEffect(() => {
     if (shutdownRun) return;
-
     setTimers((t) => {
       const n = { ...t };
       let changed = false;
@@ -464,50 +367,41 @@ function useInterlocks(
     });
   }, [state, setTimers, shutdownRun]);
 
-  // 4) Cascata por transição ON→OFF (mantida; ajuda quando há mudanças de estado)
+  // Também agenda downstream quando detecta transição ON→OFF por outros motivos
   const prevRef = useRef<StateRecord>(state);
   useEffect(() => {
     if (!(interlocksEnabled || shutdownRun)) {
       prevRef.current = state;
       return;
     }
-
     const prev = prevRef.current;
-    const wasOn = (k: UnitKey) => (prev[k] === MODE.MANUAL || prev[k] === MODE.AUTO);
-    const isOffNow = (k: UnitKey) => state[k] === MODE.OFF;
-
-    const scheduleIfJustTurnedOff = (k: UnitKey) => {
-      if (wasOn(k) && isOffNow(k)) {
+    ORDER.forEach((k) => {
+      const wasOn = prev[k] === MODE.MANUAL || prev[k] === MODE.AUTO;
+      const isOffNow = state[k] === MODE.OFF;
+      if (wasOn && isOffNow) {
         setTimers((t) => {
-          const add: TimersRecord = { ...t };
-          for (const d of immediateDownstream(k)) {
-            if (!add[d]) add[d] = TIMER_SECONDS;
-          }
+          const add = { ...t };
+          for (const d of immediateDownstream(k)) if (!add[d]) add[d] = TIMER_SECONDS;
           return add;
         });
       }
-    };
-
-    ORDER.forEach(scheduleIfJustTurnedOff);
+    });
     prevRef.current = state;
   }, [interlocksEnabled, shutdownRun, state, setTimers]);
 
-  // 5) Encerramento da cascata
+  // Encerrar cascata quando não houver timers e tudo estiver OFF
   useEffect(() => {
     if (!shutdownRun) return;
     const noTimers = Object.keys(timers).length === 0;
-    const anyOn = ORDER.some((k) => state[k] === MODE.MANUAL || state[k] === MODE.AUTO);
+    const anyOn = ORDER.some((k) => isOnMode(state[k]));
     if (noTimers && !anyOn) {
       setShutdownRun(false);
-      // limpa o histórico para a próxima vez
       visitedRef.current = new Set();
     }
   }, [shutdownRun, timers, state, setShutdownRun]);
 }
 
-/* =====================================================================
-   UI Helpers
-   ===================================================================== */
+/* ======================= UI Helpers ======================= */
 
 function StatusDot({ mode }: { mode: Mode }) {
   const cls =
@@ -522,13 +416,7 @@ function StatusDot({ mode }: { mode: Mode }) {
 }
 
 function modeToText(mode: Mode) {
-  return mode === MODE.MANUAL
-    ? "Ligado (manual)"
-    : mode === MODE.AUTO
-    ? "Ligado (interlock)"
-    : mode === MODE.DEFECT
-    ? "Defeito"
-    : "Pronto";
+  return mode === MODE.MANUAL ? "Ligado (manual)" : mode === MODE.AUTO ? "Ligado (interlock)" : mode === MODE.DEFECT ? "Defeito" : "Pronto";
 }
 
 const ITEM_COMMON = [
@@ -578,18 +466,13 @@ function Countdown({ unitKey }: { unitKey: UnitKey }) {
   const remaining = timers[unitKey];
   if (!remaining) return null;
   return (
-    <span
-      className="text-[10px] ml-2 px-1.5 py-0.5 rounded bg-slate-100 border text-slate-600"
-      title="Desligamento em"
-    >
+    <span className="text-[10px] ml-2 px-1.5 py-0.5 rounded bg-slate-100 border text-slate-600" title="Desligamento em">
       {remaining}s
     </span>
   );
 }
 
-/* =====================================================================
-   Controles (botões)
-   ===================================================================== */
+/* ======================= UI: Controles e Processos ======================= */
 
 function ToggleButton({ unitKey }: { unitKey: UnitKey }) {
   const { state, actions, groupMode } = useSystem();
@@ -611,17 +494,11 @@ function ToggleButton({ unitKey }: { unitKey: UnitKey }) {
       </div>
       <div className="flex items-center">
         <span className="text-xs px-2 py-1 rounded-full border bg-white">{modeToText(mode)}</span>
-        {state[unitKey] !== MODE.OFF && state[unitKey] !== MODE.DEFECT && (
-          <Countdown unitKey={unitKey} />
-        )}
+        {state[unitKey] !== MODE.OFF && state[unitKey] !== MODE.DEFECT && <Countdown unitKey={unitKey} />}
       </div>
     </button>
   );
 }
-
-/* =====================================================================
-   Processos (visuais)
-   ===================================================================== */
 
 function ProcessBadge({ unitKey }: { unitKey: UnitKey }) {
   const { state, actions, groupMode } = useSystem();
@@ -633,13 +510,7 @@ function ProcessBadge({ unitKey }: { unitKey: UnitKey }) {
       role="button"
       onClick={() => !disabled && actions.toggleDefect(unitKey)}
       className={badgeClasses(mode, disabled)}
-      title={
-        disabled
-          ? "Desabilitado no modo AUTO"
-          : mode === MODE.DEFECT
-          ? "Clique para limpar defeito"
-          : "Clique para marcar defeito"
-      }
+      title={disabled ? "Desabilitado no modo AUTO" : mode === MODE.DEFECT ? "Clique para limpar defeito" : "Clique para marcar defeito"}
     >
       <div className="flex items-center gap-3">
         <StatusDot mode={mode} />
@@ -647,17 +518,13 @@ function ProcessBadge({ unitKey }: { unitKey: UnitKey }) {
       </div>
       <div className="flex items-center">
         <span className="text-xs px-2 py-1 rounded-full border bg-white">{modeToText(mode)}</span>
-        {state[unitKey] !== MODE.OFF && state[unitKey] !== MODE.DEFECT && (
-          <Countdown unitKey={unitKey} />
-        )}
+        {state[unitKey] !== MODE.OFF && state[unitKey] !== MODE.DEFECT && <Countdown unitKey={unitKey} />}
       </div>
     </div>
   );
 }
 
-/* =====================================================================
-   Listas
-   ===================================================================== */
+/* ======================= UI: Listas ======================= */
 
 function ControlsList() {
   return (
@@ -703,9 +570,7 @@ function VisualList() {
   );
 }
 
-/* =====================================================================
-   Seletor de Grupo (AUTO / MANU) + On/Off
-   ===================================================================== */
+/* ======================= UI: Grupo (AUTO / MANU) + On/Off ======================= */
 
 function GroupSelector() {
   const { groupMode, actions } = useSystem();
@@ -719,12 +584,7 @@ function GroupSelector() {
           type="button"
           aria-pressed={isAuto}
           onClick={() => actions.setGroupMode(GROUP_MODE.AUTO)}
-          className={[
-            "px-3 py-1.5 rounded-xl border text-sm transition",
-            isAuto
-              ? "bg-slate-900 text-white border-slate-900 shadow-sm"
-              : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50",
-          ].join(" ")}
+          className={["px-3 py-1.5 rounded-xl border text-sm transition", isAuto ? "bg-slate-900 text-white border-slate-900 shadow-sm" : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"].join(" ")}
         >
           Automático
         </button>
@@ -732,19 +592,12 @@ function GroupSelector() {
           type="button"
           aria-pressed={!isAuto}
           onClick={() => actions.setGroupMode(GROUP_MODE.MANU)}
-          className={[
-            "px-3 py-1.5 rounded-xl border text-sm transition",
-            !isAuto
-              ? "bg-slate-900 text-white border-slate-900 shadow-sm"
-              : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50",
-          ].join(" ")}
+          className={["px-3 py-1.5 rounded-xl border text-sm transition", !isAuto ? "bg-slate-900 text-white border-slate-900 shadow-sm" : "bg-white text-slate-700 border-slate-300 hover:bg-slate-50"].join(" ")}
         >
           Manual
         </button>
       </div>
-      <p className="text-xs text-slate-500 mt-2">
-        Alternar Automático/Manual mantém os processos e timers atuais.
-      </p>
+      <p className="text-xs text-slate-500 mt-2">Alternar Automático/Manual mantém os processos e timers atuais.</p>
     </div>
   );
 }
@@ -761,12 +614,7 @@ function GroupPowerBox() {
           type="button"
           onClick={actions.groupPowerOn}
           disabled={disabled}
-          className={[
-            "px-3 py-1.5 rounded-xl border text-sm transition",
-            disabled
-              ? "bg-white text-slate-400 border-slate-200 cursor-not-allowed"
-              : "bg-green-600 text-white border-green-700 hover:bg-green-700",
-          ].join(" ")}
+          className={["px-3 py-1.5 rounded-xl border text-sm transition", disabled ? "bg-white text-slate-400 border-slate-200 cursor-not-allowed" : "bg-green-600 text-white border-green-700 hover:bg-green-700"].join(" ")}
         >
           Ligar grupo
         </button>
@@ -774,24 +622,15 @@ function GroupPowerBox() {
           type="button"
           onClick={actions.groupPowerOff}
           disabled={disabled}
-          className={[
-            "px-3 py-1.5 rounded-xl border text-sm transition",
-            disabled
-              ? "bg-white text-slate-400 border-slate-200 cursor-not-allowed"
-              : "bg-red-600 text-white border-red-700 hover:bg-red-700",
-          ].join(" ")}
+          className={["px-3 py-1.5 rounded-xl border text-sm transition", disabled ? "bg-white text-slate-400 border-slate-200 cursor-not-allowed" : "bg-red-600 text-white border-red-700 hover:bg-red-700"].join(" ")}
         >
           Desligar grupo
         </button>
       </div>
 
-      {disabled && (
-        <p className="text-[11px] text-slate-500 mt-2">
-          Disponível apenas quando o Grupo estiver em <strong>AUTO</strong>.
-        </p>
-      )}
+      {disabled && <p className="text-[11px] text-slate-500 mt-2">Disponível apenas quando o Grupo estiver em <strong>AUTO</strong>.</p>}
 
-      {/* Aviso solicitado abaixo de On/Off */}
+      {/* Aviso operacional do desligamento em cascata */}
       <p className="text-xs text-slate-500 mt-2">
         Ao desligar grupo, não é exibido o contador de componentes desligados. Aguarde que todo o sistema será desligado.
       </p>
@@ -799,9 +638,7 @@ function GroupPowerBox() {
   );
 }
 
-/* =====================================================================
-   Painel Principal
-   ===================================================================== */
+/* ======================= Painel Principal ======================= */
 
 export default function IndustrialFlowPanel() {
   return (
@@ -809,16 +646,11 @@ export default function IndustrialFlowPanel() {
       <div className="min-h-screen w-full bg-gradient-to-b from-slate-50 to-slate-100 p-6">
         <main className="mx-auto max-w-5xl">
           <header className="mb-6">
-            <h1 className="text-2xl md:text-3xl font-bold tracking-tight">
-              Fluxo Industrial (V1.9 — Cascata Top→Down resiliente)
-            </h1>
+            <h1 className="text-2xl md:text-3xl font-bold tracking-tight">Fluxo Industrial (V1.9 — Cascata Top→Down resiliente)</h1>
             <p className="text-slate-600 mt-1">
-              Interlocks no AUTO • Timers de 3s • Defeitos persistentes • Desligamento{" "}
-              <em>de cima para baixo</em> • Ligar TC03/TC04 aciona toda a montante • Cascata mantém-se ao alternar Automático/Manual •
-              Onda de desligamento continua mesmo com trechos já OFF
+              Interlocks no AUTO • Timers de 3s • Defeitos persistentes • Desligamento <em>de cima para baixo</em> • Ligar TC03/TC04 aciona toda a montante • Cascata mantém-se ao alternar Automático/Manual • Onda de desligamento continua mesmo com trechos já OFF
             </p>
 
-            {/* Grupo + On/Off lado a lado */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
               <GroupSelector />
               <GroupPowerBox />
