@@ -225,8 +225,6 @@ function createActions(
   const hasActiveTimers = () => Object.keys(timers).length > 0;
   const isDefect = (k: UnitKey) => state[k] === MODE.DEFECT;
 
-  const bulk = (entries: Partial<StateRecord>) => setState((s) => ({ ...s, ...entries }));
-
   const addTimers = (keys: UnitKey[]) =>
     setTimers((t) => {
       const next: TimersRecord = { ...t };
@@ -266,12 +264,6 @@ function createActions(
         });
       }
     };
-
-  const canAutoStart = (k: UnitKey) => {
-    if (state[k] === MODE.DEFECT) return false;
-    const ds = downstreamOf(k);
-    return !ds.some((d) => state[d] === MODE.DEFECT);
-  };
 
   const groupPowerOn = () => {
     if (groupMode !== GROUP_MODE.AUTO) return;
@@ -465,7 +457,7 @@ function useInterlocks(
         
         if (startupRun) {
           const next: TimersRecord = { ...nextBase };
-          let draft: StateRecord = { ...state };
+          const draft: StateRecord = { ...state };
           const promotedThisTick = new Set<UnitKey>();
           const interlockedThisTick = new Set<UnitKey>();
 
