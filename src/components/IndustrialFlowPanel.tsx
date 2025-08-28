@@ -17,17 +17,17 @@ type GroupMode = "auto" | "manu";
 
 const MODE = { OFF: "off", MANUAL: "manual", AUTO: "auto", DEFECT: "defect" } as const;
 const GROUP_MODE = { AUTO: "auto", MANU: "manu" } as const;
-const TIMER_SECONDS = 3;
+const TIMER_SECONDS = 2;
 
 const ORDER = [
-  "esteiraMain",
-  "moedorMotorA",
-  "moedorMotorB",
-  "canoUnderMotor",
-  "esteiraUnderCano",
-  "separador",
-  "esteiraEsquerda",
-  "esteiraDireita",
+  "TransportadorCorreia01",
+  "MoinhoMarteloM1",
+  "MoinhoMarteloM2",
+  "ValvulaRotativa01",
+  "TransportadorCorreia02",
+  "CaliaVibratoria",
+  "TransportadorCorreia03",
+  "TransportadorCorreia04",
 ] as const;
 
 type UnitKey = (typeof ORDER)[number];
@@ -35,14 +35,14 @@ type StateRecord = Record<UnitKey, Mode>;
 type TimersRecord = Partial<Record<UnitKey, number>>;
 
 const LABELS: Record<UnitKey, string> = {
-  esteiraMain: "TC01",
-  moedorMotorA: "MM01M1",
-  moedorMotorB: "MM01M2",
-  canoUnderMotor: "VR01",
-  esteiraUnderCano: "TC02",
-  separador: "CV01",
-  esteiraEsquerda: "TC03",
-  esteiraDireita: "TC04",
+  TransportadorCorreia01: "TC01",
+  MoinhoMarteloM1: "MM01M1",
+  MoinhoMarteloM2: "MM01M2",
+  ValvulaRotativa01: "VR01",
+  TransportadorCorreia02: "TC02",
+  CaliaVibratoria: "CV01",
+  TransportadorCorreia03: "TC03",
+  TransportadorCorreia04: "TC04",
 };
 
 /* ======================= Contexto do Sistema ======================= */
@@ -72,7 +72,6 @@ function makeInitialState(): StateRecord {
   return s;
 }
 
-/** Estado persistido em localStorage */
 function useSavedState<T>(key: string, initial: T) {
   const [val, setVal] = useState<T>(() => {
     try {
@@ -144,44 +143,42 @@ function useSystem(): SystemContextValue {
 const idxOf = (k: UnitKey) => ORDER.indexOf(k);
 const upstreamOf = (key: UnitKey): UnitKey[] => ORDER.slice(0, idxOf(key)) as UnitKey[];
 
-// Mapeamento imediato para cima e para baixo
 const immediateDownstream = (key: UnitKey): UnitKey[] => {
   switch (key) {
-    case "esteiraMain":
-      return ["moedorMotorA", "moedorMotorB"];
-    case "moedorMotorA":
-    case "moedorMotorB":
-      return ["canoUnderMotor"];
-    case "canoUnderMotor":
-      return ["esteiraUnderCano"];
-    case "esteiraUnderCano":
-      return ["separador"];
-    case "separador":
-      return ["esteiraEsquerda", "esteiraDireita"];
+    case "TransportadorCorreia01":
+      return ["MoinhoMarteloM1", "MoinhoMarteloM2"];
+    case "MoinhoMarteloM1":
+    case "MoinhoMarteloM2":
+      return ["ValvulaRotativa01"];
+    case "ValvulaRotativa01":
+      return ["TransportadorCorreia02"];
+    case "TransportadorCorreia02":
+      return ["CaliaVibratoria"];
+    case "CaliaVibratoria":
+      return ["TransportadorCorreia03", "TransportadorCorreia04"];
     default:
       return [];
   }
 };
 const immediateUpstream = (key: UnitKey): UnitKey[] => {
   switch (key) {
-    case "moedorMotorA":
-    case "moedorMotorB":
-      return ["esteiraMain"];
-    case "canoUnderMotor":
-      return ["moedorMotorA", "moedorMotorB"];
-    case "esteiraUnderCano":
-      return ["canoUnderMotor"];
-    case "separador":
-      return ["esteiraUnderCano"];
-    case "esteiraEsquerda":
-    case "esteiraDireita":
-      return ["separador"];
+    case "MoinhoMarteloM1":
+    case "MoinhoMarteloM2":
+      return ["TransportadorCorreia01"];
+    case "ValvulaRotativa01":
+      return ["MoinhoMarteloM1", "MoinhoMarteloM2"];
+    case "TransportadorCorreia02":
+      return ["ValvulaRotativa01"];
+    case "CaliaVibratoria":
+      return ["TransportadorCorreia02"];
+    case "TransportadorCorreia03":
+    case "TransportadorCorreia04":
+      return ["CaliaVibratoria"];
     default:
       return [];
   }
 };
 
-// todos os descendentes (downstream) de um nó (busca em largura)
 function downstreamOf(node: UnitKey): UnitKey[] {
   const result: UnitKey[] = [];
   const q: UnitKey[] = [node];
@@ -201,10 +198,9 @@ function downstreamOf(node: UnitKey): UnitKey[] {
 
 const isOnMode = (m: Mode) => m === MODE.MANUAL || m === MODE.AUTO;
 
-const FINAL_LEFT: UnitKey = "esteiraEsquerda";
-const FINAL_RIGHT: UnitKey = "esteiraDireita";
+const FINAL_LEFT: UnitKey = "TransportadorCorreia03";
+const FINAL_RIGHT: UnitKey = "TransportadorCorreia04";
 
-/** Sementes de desligamento: primeiros nós ON de cada ramo (sem montante ON) */
 function topmostOnSeeds(s: StateRecord): UnitKey[] {
   const seeds: UnitKey[] = [];
   for (const k of ORDER) {
@@ -252,75 +248,71 @@ function createActions(
       return n;
     });
 
-  // Não permitir troca de modo enquanto houver timers rodando
-  const setGroupModeSafe = (nextMode: GroupMode) => {
-    if (hasActiveTimers()) return; // bloqueia alternância com contadores ativos
-    setGroupMode(nextMode);
-    if (nextMode === GROUP_MODE.AUTO) {
-      // MANUAL -> AUTO: verdes -> amarelos, exceto TC03/TC04
-      setState((s) => {
-        const n: Partial<StateRecord> = {};
-        ORDER.forEach((k) => {
-          if (k === FINAL_LEFT || k === FINAL_RIGHT) return; // exceção
-          if (s[k] === MODE.MANUAL) n[k] = MODE.AUTO;
+    const setGroupModeSafe = (nextMode: GroupMode) => {
+      if (hasActiveTimers()) return;
+      if (nextMode === GROUP_MODE.MANU) {
+        setStartupRun(false);
+        setShutdownRun(false);
+        setTimers({});
+      }
+      setGroupMode(nextMode);
+      if (nextMode === GROUP_MODE.AUTO) {
+        setState((s) => {
+          const n: Partial<StateRecord> = {};
+          ORDER.forEach((k) => {
+            if (s[k] === MODE.MANUAL) n[k] = MODE.AUTO;
+          });
+          return { ...s, ...n };
         });
-        return { ...s, ...n };
-      });
-    }
-  };
+      }
+    };
 
-  // Regras de startup respeitando defeitos: um nó só pode ligar via AUTO/cascata
-  // se não houver nenhum defeito em sua cadeia downstream.
   const canAutoStart = (k: UnitKey) => {
     if (state[k] === MODE.DEFECT) return false;
     const ds = downstreamOf(k);
     return !ds.some((d) => state[d] === MODE.DEFECT);
   };
 
-  // Ligar em cascata de baixo pra cima:
-  // - finais (TC03/TC04) verdes (se não defeito)
-  // - nós acima ficam AMARELO e recebem TIMER neles mesmos (contador no próprio nó)
-  // - a cada 3s, o nó com timer vira VERDE e agenda o imediatamente acima
   const groupPowerOn = () => {
     if (groupMode !== GROUP_MODE.AUTO) return;
-    if (hasActiveTimers()) return; // evita iniciar com contadores ativos
+    if (hasActiveTimers()) return;
 
     setShutdownRun(false);
-    setStartupRun(false);
+    setStartupRun(true);
     setTimers({});
 
-    // finais verdes se não defeito
-    const finalsOn: Partial<StateRecord> = {};
-    if (state[FINAL_LEFT] !== MODE.DEFECT) finalsOn[FINAL_LEFT] = MODE.MANUAL;
-    if (state[FINAL_RIGHT] !== MODE.DEFECT) finalsOn[FINAL_RIGHT] = MODE.MANUAL;
+    const toTimer = new Set<UnitKey>();
 
-    // todos montantes amarelos (quando permitido) e timers no imediato acima dos finais
-    const toAutoNow = new Set<UnitKey>();
-    const toTimer: UnitKey[] = [];
-
-    function seedAbove(finalKey: UnitKey) {
-      for (const up of upstreamOf(finalKey)) {
-        if (canAutoStart(up)) toAutoNow.add(up);
+    [FINAL_LEFT, FINAL_RIGHT].forEach((f) => {
+      if (state[f] === MODE.OFF) {
+        setState((s) => ({ ...s, [f]: MODE.AUTO }));
+        toTimer.add(f);
       }
-      for (const u of immediateUpstream(finalKey)) {
-        if (canAutoStart(u)) toTimer.push(u);
-      }
-    }
-
-    seedAbove(FINAL_LEFT);
-    seedAbove(FINAL_RIGHT);
-
-    const autoObj: Partial<StateRecord> = {};
-    toAutoNow.forEach((k) => {
-      if (state[k] !== MODE.DEFECT) autoObj[k] = MODE.AUTO;
     });
 
-    bulk({ ...autoObj, ...finalsOn });
-    if (toTimer.length) addTimers(toTimer);
-    setStartupRun(!!toTimer.length);
+    ORDER.forEach((k) => {
+      if (state[k] === MODE.OFF) {
+        const ds = immediateDownstream(k);
+        if (ds.some((d) => state[d] === MODE.AUTO || state[d] === MODE.MANUAL)) {
+          toTimer.add(k);
+        }
+      }
+    });
+
+    ORDER.forEach((k) => {
+      if (
+        state[k] === MODE.AUTO &&
+        immediateDownstream(k).every(
+          (d) => state[d] === MODE.MANUAL || state[d] === MODE.DEFECT
+        )
+      ) {
+        toTimer.add(k);
+      }
+    });
+
+    if (toTimer.size) addTimers(Array.from(toTimer));
   };
 
-  // Desligamento em cascata
   const groupPowerOff = () => {
     if (groupMode !== GROUP_MODE.AUTO) return;
     if (hasActiveTimers()) return;
@@ -331,27 +323,37 @@ function createActions(
     addTimers(seeds);
   };
 
-  /** Clique manual (permitido em MANU): moedores espelhados; demais alternam */
   const clickManualOnly = (key: UnitKey) => {
     if (isDefect(key)) return;
 
-    if (key === "moedorMotorA" || key === "moedorMotorB") {
+    if (key === "MoinhoMarteloM1" || key === "MoinhoMarteloM2") {
       const self = key;
-      const other: UnitKey = key === "moedorMotorA" ? "moedorMotorB" : "moedorMotorA";
+      const other: UnitKey = key === "MoinhoMarteloM1" ? "MoinhoMarteloM2" : "MoinhoMarteloM1";
       setState((s) => {
         const nextSelf = s[self] === MODE.MANUAL ? MODE.OFF : MODE.MANUAL;
-        return { ...s, [self]: nextSelf, [other]: nextSelf };
+        const next: StateRecord = { ...s, [self]: nextSelf, [other]: nextSelf };
+        if (nextSelf === MODE.OFF) {
+          for (const up of upstreamOf(self)) if (next[up] === MODE.AUTO) next[up] = MODE.OFF;
+          for (const up of upstreamOf(other)) if (next[up] === MODE.AUTO) next[up] = MODE.OFF;
+        }
+        return next;
       });
       clearTimer(key);
       clearTimer(other);
+      clearTimersFor([...upstreamOf(key), ...upstreamOf(other)]);
       return;
     }
 
     setState((s) => {
-      const next: Mode = s[key] === MODE.MANUAL ? MODE.OFF : MODE.MANUAL;
-      return { ...s, [key]: next };
+      const isTurningOff = s[key] === MODE.MANUAL;
+      const next: StateRecord = { ...s, [key]: isTurningOff ? MODE.OFF : MODE.MANUAL };
+      if (isTurningOff) {
+        for (const up of upstreamOf(key)) if (next[up] === MODE.AUTO) next[up] = MODE.OFF;
+      }
+      return next;
     });
     clearTimer(key);
+    clearTimersFor(upstreamOf(key));
   };
 
   const clickButton = (key: UnitKey) => {
@@ -359,7 +361,6 @@ function createActions(
     return clickManualOnly(key);
   };
 
-  // Ao marcar defeito, processos acima param imediatamente
   const toggleDefect = (key: UnitKey) => {
     if (groupMode === GROUP_MODE.AUTO) return;
     const willBeDefect = state[key] !== MODE.DEFECT;
@@ -393,7 +394,6 @@ function useInterlocks(
 ) {
   const interlocksEnabled = groupMode === GROUP_MODE.AUTO;
 
-  // Nós “processados” para desligamento
   const visitedDownRef = useRef<Set<UnitKey>>(new Set());
   const shutdownWasOnRef = useRef(false);
   useEffect(() => {
@@ -401,11 +401,10 @@ function useInterlocks(
     shutdownWasOnRef.current = shutdownRun;
   }, [shutdownRun]);
 
-  // espelhar moedores no AUTO (se ambos sem defeito)
   useEffect(() => {
     if (!interlocksEnabled) return;
-    const a = state.moedorMotorA;
-    const b = state.moedorMotorB;
+    const a = state.MoinhoMarteloM1;
+    const b = state.MoinhoMarteloM2;
     if (a === MODE.DEFECT || b === MODE.DEFECT || a === b) return;
     const next: Mode =
       a === MODE.MANUAL || b === MODE.MANUAL
@@ -413,10 +412,9 @@ function useInterlocks(
         : a === MODE.AUTO || b === MODE.AUTO
         ? MODE.AUTO
         : MODE.OFF;
-    setState((s) => ({ ...s, moedorMotorA: next, moedorMotorB: next }));
-  }, [interlocksEnabled, state.moedorMotorA, state.moedorMotorB, setState]);
+    setState((s) => ({ ...s, MoinhoMarteloM1: next, MoinhoMarteloM2: next }));
+  }, [interlocksEnabled, state.MoinhoMarteloM1, state.MoinhoMarteloM2, setState]);
 
-  // Tick dos timers: desligamento (downstream) e ligamento (upstream com contador no próprio nó)
   useEffect(() => {
     if (!Object.keys(timers).length) return;
 
@@ -430,7 +428,6 @@ function useInterlocks(
           else nextBase[k] = nv;
         }
 
-        // SHUTDOWN
         if (shutdownRun) {
           if (expired.length) {
             setState((s) => {
@@ -450,12 +447,11 @@ function useInterlocks(
           if (expired.length) {
             for (const k of expired) {
               for (const d of immediateDownstream(k)) {
-                if (next[d] == null) next[d] = TIMER_SECONDS; // contador no próprio nó que vai desligar
+                if (next[d] == null) next[d] = TIMER_SECONDS;
               }
             }
           }
 
-          // Encerrar quando sem timers e tudo OFF
           if (Object.keys(next).length === 0) {
             const anyOn = ORDER.some((k) => isOnMode(state[k]));
             if (!anyOn) {
@@ -466,52 +462,84 @@ function useInterlocks(
 
           return next;
         }
-
-        // STARTUP (contador no próprio nó que vai ligar/mudar)
+        
         if (startupRun) {
-          // nó com timer expira => vira VERDE
-          if (expired.length) {
-            setState((s) => {
-              const u = { ...s };
-              for (const k of expired) {
-                if (u[k] !== MODE.DEFECT) u[k] = MODE.MANUAL;
-              }
-              return u;
-            });
-          }
-
           const next: TimersRecord = { ...nextBase };
+          let draft: StateRecord = { ...state };
+          const promotedThisTick = new Set<UnitKey>();
+          const interlockedThisTick = new Set<UnitKey>();
 
-          // agendar o imediatamente acima: colocar AMARELO agora e timer nele
-          for (const k of expired) {
-            for (const up of immediateUpstream(k)) {
-              // Só progride se não houver defeito downstream do "up"
-              const ds = downstreamOf(up);
-              const hasDefectBelow = ds.some((d) => state[d] === MODE.DEFECT);
-              if (state[up] !== MODE.DEFECT && !hasDefectBelow) {
-                setState((s) => ({ ...s, [up]: MODE.AUTO }));
-                if (next[up] == null) next[up] = TIMER_SECONDS;
+          const expiredByDepth = [...expired].sort((a, b) => idxOf(b) - idxOf(a));
+          const schedule = (k: UnitKey) => {
+            if (next[k] == null && timers[k] == null) {
+              next[k] = TIMER_SECONDS;
+            }
+          };
+
+          for (const k of expiredByDepth) {
+            const cur = state[k];
+
+            if (cur === MODE.OFF) {
+              if (draft[k] === MODE.OFF) {
+                draft[k] = MODE.AUTO;
+                interlockedThisTick.add(k);
+                if (timers[k] == null) schedule(k);
+              }
+              continue;
+            }
+
+            if (cur === MODE.AUTO) {
+              const ds = immediateDownstream(k);
+              const ready = ds.every((d) => state[d] === MODE.MANUAL || state[d] === MODE.DEFECT);
+
+              if (ready) {
+                draft[k] = MODE.MANUAL;
+                promotedThisTick.add(k);
+              } else {
+                schedule(k);
               }
             }
           }
 
-          if (Object.keys(next).length === 0) {
-            setStartupRun(false);
+          for (const k of promotedThisTick) {
+            for (const up of immediateUpstream(k)) {
+              const hasDefectBelow = downstreamOf(up).some((d) => draft[d] === MODE.DEFECT);
+
+              if (draft[up] === MODE.OFF && !hasDefectBelow) {
+                draft[up] = MODE.AUTO;
+                if (timers[up] == null) schedule(up);
+              } else if (draft[up] === MODE.AUTO) {
+                if (timers[up] == null) schedule(up);
+              }
+            }
           }
 
+          for (const k of interlockedThisTick) {
+            for (const up of immediateUpstream(k)) {
+              const hasDefectBelow = downstreamOf(up).some((d) => draft[d] === MODE.DEFECT);
+
+              if (!hasDefectBelow) {
+                if (draft[up] === MODE.OFF) {
+                  if (timers[up] == null) schedule(up);
+                } else if (draft[up] === MODE.AUTO) {
+                  if (timers[up] == null) schedule(up);
+                }
+              }
+            }
+          }
+
+          setState(draft);
+          if (Object.keys(next).length === 0) setStartupRun(false);
           return next;
         }
 
-        // Sem cascatas ativas
         return nextBase;
       });
     }, 1000);
 
     return () => clearInterval(id);
-  // 👇 Adicionados setShutdownRun e setStartupRun nas dependências
   }, [timers, setTimers, setState, shutdownRun, startupRun, state, setShutdownRun, setStartupRun]);
 
-  // Higiene: não limpar timers durante cascatas
   useEffect(() => {
     if (shutdownRun || startupRun) return;
     setTimers((t) => {
@@ -527,10 +555,9 @@ function useInterlocks(
     });
   }, [state, setTimers, shutdownRun, startupRun]);
 
-  // Propagar timers para baixo quando detectar ON→OFF por outros motivos (desligamento assistido)
   const prevRef = useRef<StateRecord>(state);
   useEffect(() => {
-    if (!(interlocksEnabled || shutdownRun)) {
+    if (!shutdownRun) {
       prevRef.current = state;
       return;
     }
@@ -547,7 +574,7 @@ function useInterlocks(
       }
     });
     prevRef.current = state;
-  }, [interlocksEnabled, shutdownRun, state, setTimers]);
+  }, [shutdownRun, state, setTimers]);
 }
 
 /* ======================= UI Helpers ======================= */
@@ -565,7 +592,7 @@ function StatusDot({ mode }: { mode: Mode }) {
 }
 
 function modeToText(mode: Mode) {
-  return mode === MODE.MANUAL ? "Ligado (manual)" : mode === MODE.AUTO ? "Ligado (interlock)" : mode === MODE.DEFECT ? "Defeito" : "Pronto";
+  return mode === MODE.MANUAL ? "Ligado" : mode === MODE.AUTO ? "Interlock" : mode === MODE.DEFECT ? "Defeito" : "Desligado";
 }
 
 const ITEM_COMMON = [
@@ -688,20 +715,20 @@ function ProcessBadge({ unitKey }: { unitKey: UnitKey }) {
 function ControlsList() {
   return (
     <div className="space-y-3">
-      <ToggleButton unitKey="esteiraMain" />
+      <ToggleButton unitKey="TransportadorCorreia01" />
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <ToggleButton unitKey="moedorMotorA" />
-        <ToggleButton unitKey="moedorMotorB" />
+        <ToggleButton unitKey="MoinhoMarteloM1" />
+        <ToggleButton unitKey="MoinhoMarteloM2" />
       </div>
 
-      <ToggleButton unitKey="canoUnderMotor" />
-      <ToggleButton unitKey="esteiraUnderCano" />
-      <ToggleButton unitKey="separador" />
+      <ToggleButton unitKey="ValvulaRotativa01" />
+      <ToggleButton unitKey="TransportadorCorreia02" />
+      <ToggleButton unitKey="CaliaVibratoria" />
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <ToggleButton unitKey="esteiraEsquerda" />
-        <ToggleButton unitKey="esteiraDireita" />
+        <ToggleButton unitKey="TransportadorCorreia03" />
+        <ToggleButton unitKey="TransportadorCorreia04" />
       </div>
     </div>
   );
@@ -710,20 +737,20 @@ function ControlsList() {
 function VisualList() {
   return (
     <div className="space-y-3">
-      <ProcessBadge unitKey="esteiraMain" />
+      <ProcessBadge unitKey="TransportadorCorreia01" />
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <ProcessBadge unitKey="moedorMotorA" />
-        <ProcessBadge unitKey="moedorMotorB" />
+        <ProcessBadge unitKey="MoinhoMarteloM1" />
+        <ProcessBadge unitKey="MoinhoMarteloM2" />
       </div>
 
-      <ProcessBadge unitKey="canoUnderMotor" />
-      <ProcessBadge unitKey="esteiraUnderCano" />
-      <ProcessBadge unitKey="separador" />
+      <ProcessBadge unitKey="ValvulaRotativa01" />
+      <ProcessBadge unitKey="TransportadorCorreia02" />
+      <ProcessBadge unitKey="CaliaVibratoria" />
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <ProcessBadge unitKey="esteiraEsquerda" />
-        <ProcessBadge unitKey="esteiraDireita" />
+        <ProcessBadge unitKey="TransportadorCorreia03" />
+        <ProcessBadge unitKey="TransportadorCorreia04" />
       </div>
     </div>
   );
@@ -773,9 +800,7 @@ function GroupSelector() {
           Manual
         </button>
       </div>
-      <p className="text-xs text-slate-500 mt-2">
-        Alternar entre Automático/Manual. Espere os contadores terminarem para alterar.
-      </p>
+      <p className="text-xs text-slate-500 mt-2">Espere os contadores terminarem para alterar.</p>
     </div>
   );
 }
@@ -799,7 +824,7 @@ function GroupPowerBox() {
               : "bg-green-600 text-white border-green-700 hover:bg-green-700",
           ].join(" ")}
         >
-          Ligar grupo
+          Ligar fluxo
         </button>
         <button
           type="button"
@@ -812,19 +837,15 @@ function GroupPowerBox() {
               : "bg-red-600 text-white border-red-700 hover:bg-red-700",
           ].join(" ")}
         >
-          Desligar grupo
+          Desligar fluxo
         </button>
       </div>
 
       {groupMode !== GROUP_MODE.AUTO && (
-        <p className="text-[11px] text-slate-500 mt-2">
-          Disponível apenas quando o Grupo estiver em <strong>AUTO</strong>.
+        <p className="text-xs text-slate-500 mt-2">
+          Disponível apenas quando o Grupo estiver em <strong>Automático</strong>.
         </p>
       )}
-
-      <p className="text-xs text-slate-500 mt-2">
-        Ao desligar grupo, não é exibido o contador de componentes desligados. Aguarde que todo o sistema será desligado.
-      </p>
     </div>
   );
 }
@@ -838,10 +859,10 @@ export default function IndustrialFlowPanel() {
         <main className="mx-auto max-w-5xl">
           <header className="mb-6">
             <h1 className="text-2xl md:text-3xl font-bold tracking-tight text-black">
-              Fluxo Industrial (V2.1.1)
+              Fluxo Industrial (V1.6)
             </h1>
             <p className="text-slate-700 mt-1">
-              Painel de simulação com intertravamentos, timers de 3s e cascatas de liga/desliga (bottom-up / top-down), incluindo defeitos persistentes e espelhamento dos moedores.
+              Simulação de um fluxo industrial usando react com typescript.
             </p>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
@@ -861,7 +882,7 @@ export default function IndustrialFlowPanel() {
           </section>
 
           <p className="text-slate-700 mt-6">
-            No modo <strong>Automático</strong>, os controles individuais ficam desabilitados.
+            No modo <strong>Automático</strong>, os controles individuais ficam desabilitados. Além disso, equipamentos <strong>Ligados</strong> passam a <strong>Interlock</strong>. Ao marcar <strong>Defeito</strong>, todos em <strong>Interlock</strong> acima desligam.
           </p>
         </main>
       </div>
