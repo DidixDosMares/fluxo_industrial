@@ -5,17 +5,16 @@ import React, {
   useContext,
   useEffect,
   useMemo,
-  useRef,
   useState,
   ReactNode,
 } from "react";
 
 /* ======================= Tipos e Constantes ======================= */
 
-type Mode = "off" | "manual" | "auto" | "defect";
+type Mode = "off" | "manual" | "defect";
 type GroupMode = "auto" | "manu";
 
-const MODE = { OFF: "off", MANUAL: "manual", AUTO: "auto", DEFECT: "defect" } as const;
+const MODE = { OFF: "off", MANUAL: "manual", DEFECT: "defect" } as const;
 const GROUP_MODE = { AUTO: "auto", MANU: "manu" } as const;
 const TIMER_SECONDS = 2;
 
@@ -25,7 +24,7 @@ const ORDER = [
   "MoinhoMarteloM2",
   "ValvulaRotativa01",
   "TransportadorCorreia02",
-  "CaliaVibratoria",
+  "PeneiraVibratoria01",
   "TransportadorCorreia03",
   "TransportadorCorreia04",
 ] as const;
@@ -40,7 +39,7 @@ const LABELS: Record<UnitKey, string> = {
   MoinhoMarteloM2: "MM01M2",
   ValvulaRotativa01: "VR01",
   TransportadorCorreia02: "TC02",
-  CaliaVibratoria: "CV01",
+  PeneiraVibratoria01: "CV01",
   TransportadorCorreia03: "TC03",
   TransportadorCorreia04: "TC04",
 };
@@ -67,9 +66,7 @@ interface SystemContextValue {
 const SystemContext = createContext<SystemContextValue | null>(null);
 
 function makeInitialState(): StateRecord {
-  const s = {} as StateRecord;
-  ORDER.forEach((k) => (s[k] = MODE.OFF));
-  return s;
+  return Object.fromEntries(ORDER.map((k) => [k, MODE.OFF])) as StateRecord;
 }
 
 function useSavedState<T>(key: string, initial: T) {
@@ -97,7 +94,7 @@ function SystemProvider({ children }: { children: ReactNode }) {
   const [shutdownRun, setShutdownRun] = useSavedState<boolean>("flow_shutdown_active", false);
   const [startupRun, setStartupRun] = useSavedState<boolean>("flow_startup_active", false);
 
-  useInterlocks(
+  useInterlocksAndCascades(
     state,
     setState,
     timers,
@@ -153,53 +150,15 @@ const immediateDownstream = (key: UnitKey): UnitKey[] => {
     case "ValvulaRotativa01":
       return ["TransportadorCorreia02"];
     case "TransportadorCorreia02":
-      return ["CaliaVibratoria"];
-    case "CaliaVibratoria":
+      return ["PeneiraVibratoria01"];
+    case "PeneiraVibratoria01":
       return ["TransportadorCorreia03", "TransportadorCorreia04"];
     default:
       return [];
   }
 };
-const immediateUpstream = (key: UnitKey): UnitKey[] => {
-  switch (key) {
-    case "MoinhoMarteloM1":
-    case "MoinhoMarteloM2":
-      return ["TransportadorCorreia01"];
-    case "ValvulaRotativa01":
-      return ["MoinhoMarteloM1", "MoinhoMarteloM2"];
-    case "TransportadorCorreia02":
-      return ["ValvulaRotativa01"];
-    case "CaliaVibratoria":
-      return ["TransportadorCorreia02"];
-    case "TransportadorCorreia03":
-    case "TransportadorCorreia04":
-      return ["CaliaVibratoria"];
-    default:
-      return [];
-  }
-};
 
-function downstreamOf(node: UnitKey): UnitKey[] {
-  const result: UnitKey[] = [];
-  const q: UnitKey[] = [node];
-  const seen = new Set<UnitKey>();
-  while (q.length) {
-    const cur = q.shift()!;
-    if (seen.has(cur)) continue;
-    seen.add(cur);
-    const ds = immediateDownstream(cur);
-    for (const d of ds) {
-      result.push(d);
-      q.push(d);
-    }
-  }
-  return result;
-}
-
-const isOnMode = (m: Mode) => m === MODE.MANUAL || m === MODE.AUTO;
-
-const FINAL_LEFT: UnitKey = "TransportadorCorreia03";
-const FINAL_RIGHT: UnitKey = "TransportadorCorreia04";
+const isOnMode = (m: Mode) => m === MODE.MANUAL;
 
 function topmostOnSeeds(s: StateRecord): UnitKey[] {
   const seeds: UnitKey[] = [];
@@ -232,13 +191,6 @@ function createActions(
       return next;
     });
 
-  const clearTimer = (key: UnitKey) =>
-    setTimers((t) => {
-      const n = { ...t };
-      delete n[key];
-      return n;
-    });
-
   const clearTimersFor = (keys: UnitKey[]) =>
     setTimers((t) => {
       const n = { ...t };
@@ -246,24 +198,18 @@ function createActions(
       return n;
     });
 
-    const setGroupModeSafe = (nextMode: GroupMode) => {
-      if (hasActiveTimers()) return;
-      if (nextMode === GROUP_MODE.MANU) {
-        setStartupRun(false);
-        setShutdownRun(false);
-        setTimers({});
-      }
-      setGroupMode(nextMode);
-      if (nextMode === GROUP_MODE.AUTO) {
-        setState((s) => {
-          const n: Partial<StateRecord> = {};
-          ORDER.forEach((k) => {
-            if (s[k] === MODE.MANUAL) n[k] = MODE.AUTO;
-          });
-          return { ...s, ...n };
-        });
-      }
-    };
+  const setGroupModeSafe = (nextMode: GroupMode) => {
+    if (hasActiveTimers()) return;
+    if (nextMode === GROUP_MODE.MANU) {
+      setStartupRun(false);
+      setShutdownRun(false);
+      setTimers({});
+    }
+    setGroupMode(nextMode);
+  };
+
+  const isReadyToTurnOn = (s: StateRecord, key: UnitKey) =>
+    s[key] === MODE.OFF && immediateDownstream(key).every((d) => s[d] === MODE.MANUAL || s[d] === MODE.DEFECT);
 
   const groupPowerOn = () => {
     if (groupMode !== GROUP_MODE.AUTO) return;
@@ -271,45 +217,27 @@ function createActions(
 
     setShutdownRun(false);
     setStartupRun(true);
-    setTimers({});
 
-    const toTimer = new Set<UnitKey>();
-
-    [FINAL_LEFT, FINAL_RIGHT].forEach((f) => {
-      if (state[f] === MODE.OFF) {
-        setState((s) => ({ ...s, [f]: MODE.AUTO }));
-        toTimer.add(f);
-      }
-    });
-
+    const toSchedule: UnitKey[] = [];
     ORDER.forEach((k) => {
-      if (state[k] === MODE.OFF) {
-        const ds = immediateDownstream(k);
-        if (ds.some((d) => state[d] === MODE.AUTO || state[d] === MODE.MANUAL)) {
-          toTimer.add(k);
-        }
-      }
+      if (isReadyToTurnOn(state, k)) toSchedule.push(k);
     });
 
-    ORDER.forEach((k) => {
-      if (
-        state[k] === MODE.AUTO &&
-        immediateDownstream(k).every(
-          (d) => state[d] === MODE.MANUAL || state[d] === MODE.DEFECT
-        )
-      ) {
-        toTimer.add(k);
-      }
-    });
-
-    if (toTimer.size) addTimers(Array.from(toTimer));
+    if (toSchedule.length) {
+      setTimers(Object.fromEntries(toSchedule.map((k) => [k, TIMER_SECONDS])) as TimersRecord);
+    } else {
+      setStartupRun(false);
+      setTimers({});
+    }
   };
 
   const groupPowerOff = () => {
     if (groupMode !== GROUP_MODE.AUTO) return;
     if (hasActiveTimers()) return;
+
     const seeds = topmostOnSeeds(state);
     if (!seeds.length) return;
+
     setStartupRun(false);
     setShutdownRun(true);
     addTimers(seeds);
@@ -324,28 +252,17 @@ function createActions(
       setState((s) => {
         const nextSelf = s[self] === MODE.MANUAL ? MODE.OFF : MODE.MANUAL;
         const next: StateRecord = { ...s, [self]: nextSelf, [other]: nextSelf };
-        if (nextSelf === MODE.OFF) {
-          for (const up of upstreamOf(self)) if (next[up] === MODE.AUTO) next[up] = MODE.OFF;
-          for (const up of upstreamOf(other)) if (next[up] === MODE.AUTO) next[up] = MODE.OFF;
-        }
         return next;
       });
-      clearTimer(key);
-      clearTimer(other);
-      clearTimersFor([...upstreamOf(key), ...upstreamOf(other)]);
+      clearTimersFor([key, other, ...upstreamOf(key), ...upstreamOf(other)]);
       return;
     }
 
     setState((s) => {
-      const isTurningOff = s[key] === MODE.MANUAL;
-      const next: StateRecord = { ...s, [key]: isTurningOff ? MODE.OFF : MODE.MANUAL };
-      if (isTurningOff) {
-        for (const up of upstreamOf(key)) if (next[up] === MODE.AUTO) next[up] = MODE.OFF;
-      }
+      const next: StateRecord = { ...s, [key]: s[key] === MODE.MANUAL ? MODE.OFF : MODE.MANUAL };
       return next;
     });
-    clearTimer(key);
-    clearTimersFor(upstreamOf(key));
+    clearTimersFor([key, ...upstreamOf(key)]);
   };
 
   const clickButton = (key: UnitKey) => {
@@ -356,24 +273,43 @@ function createActions(
   const toggleDefect = (key: UnitKey) => {
     if (groupMode === GROUP_MODE.AUTO) return;
     const willBeDefect = state[key] !== MODE.DEFECT;
+
     setState((s) => {
       const next: StateRecord = { ...s, [key]: willBeDefect ? MODE.DEFECT : MODE.OFF };
+
       if (willBeDefect) {
-        for (const up of upstreamOf(key)) if (next[up] !== MODE.DEFECT) next[up] = MODE.OFF;
+        const ups = upstreamOf(key);
+
+        const filteredUps =
+          key === "TransportadorCorreia04" && s["TransportadorCorreia03"] === MODE.MANUAL
+            ? ups.filter((u) => u !== "TransportadorCorreia03")
+            : ups;
+
+        for (const up of filteredUps) {
+          if (next[up] !== MODE.DEFECT) next[up] = MODE.OFF;
+        }
       }
+
       return next;
     });
+
     if (willBeDefect) {
-      clearTimersFor(upstreamOf(key));
+      const ups = upstreamOf(key);
+      const filteredUps =
+        key === "TransportadorCorreia04" && state["TransportadorCorreia03"] === MODE.MANUAL
+          ? ups.filter((u) => u !== "TransportadorCorreia03")
+          : ups;
+
+      clearTimersFor(filteredUps);
     }
   };
 
   return { clickButton, toggleDefect, setGroupMode: setGroupModeSafe, groupPowerOn, groupPowerOff };
 }
 
-/* ======================= Intertravamentos & Cascatas ======================= */
+/* ======================= Cascatas (ligar/desligar) ======================= */
 
-function useInterlocks(
+function useInterlocksAndCascades(
   state: StateRecord,
   setState: React.Dispatch<React.SetStateAction<StateRecord>>,
   timers: TimersRecord,
@@ -384,29 +320,6 @@ function useInterlocks(
   startupRun: boolean,
   setStartupRun: React.Dispatch<React.SetStateAction<boolean>>
 ) {
-  const interlocksEnabled = groupMode === GROUP_MODE.AUTO;
-
-  const visitedDownRef = useRef<Set<UnitKey>>(new Set());
-  const shutdownWasOnRef = useRef(false);
-  useEffect(() => {
-    if (!shutdownWasOnRef.current && shutdownRun) visitedDownRef.current = new Set();
-    shutdownWasOnRef.current = shutdownRun;
-  }, [shutdownRun]);
-
-  useEffect(() => {
-    if (!interlocksEnabled) return;
-    const a = state.MoinhoMarteloM1;
-    const b = state.MoinhoMarteloM2;
-    if (a === MODE.DEFECT || b === MODE.DEFECT || a === b) return;
-    const next: Mode =
-      a === MODE.MANUAL || b === MODE.MANUAL
-        ? MODE.MANUAL
-        : a === MODE.AUTO || b === MODE.AUTO
-        ? MODE.AUTO
-        : MODE.OFF;
-    setState((s) => ({ ...s, MoinhoMarteloM1: next, MoinhoMarteloM2: next }));
-  }, [interlocksEnabled, state.MoinhoMarteloM1, state.MoinhoMarteloM2, setState]);
-
   useEffect(() => {
     if (!Object.keys(timers).length) return;
 
@@ -421,104 +334,61 @@ function useInterlocks(
         }
 
         if (shutdownRun) {
-          if (expired.length) {
-            setState((s) => {
-              const u = { ...s };
-              for (const k of expired) {
-                if (u[k] === MODE.MANUAL || u[k] === MODE.AUTO) u[k] = MODE.OFF;
-              }
-              return u;
-            });
-            const v = new Set(visitedDownRef.current);
-            expired.forEach((k) => v.add(k));
-            visitedDownRef.current = v;
-          }
-
           const next: TimersRecord = { ...nextBase };
 
           if (expired.length) {
+            const draft: StateRecord = { ...state };
+            for (const k of expired) {
+              if (draft[k] === MODE.MANUAL) draft[k] = MODE.OFF;
+            }
+            setState(draft);
+
             for (const k of expired) {
               for (const d of immediateDownstream(k)) {
-                if (next[d] == null) next[d] = TIMER_SECONDS;
+                if (next[d] == null && prev[d] == null && state[d] === MODE.MANUAL) {
+                  next[d] = TIMER_SECONDS;
+                }
               }
             }
           }
 
           if (Object.keys(next).length === 0) {
             const anyOn = ORDER.some((k) => isOnMode(state[k]));
-            if (!anyOn) {
-              setShutdownRun(false);
-              visitedDownRef.current = new Set();
-            }
+            if (!anyOn) setShutdownRun(false);
           }
 
           return next;
         }
-        
+
         if (startupRun) {
           const next: TimersRecord = { ...nextBase };
           const draft: StateRecord = { ...state };
-          const promotedThisTick = new Set<UnitKey>();
-          const interlockedThisTick = new Set<UnitKey>();
+          const promoted = new Set<UnitKey>();
 
-          const expiredByDepth = [...expired].sort((a, b) => idxOf(b) - idxOf(a));
-          const schedule = (k: UnitKey) => {
-            if (next[k] == null && timers[k] == null) {
+          for (const k of expired) {
+            if (draft[k] === MODE.OFF) {
+              draft[k] = MODE.MANUAL;
+              promoted.add(k);
+            }
+          }
+
+          const isReady = (s: StateRecord, key: UnitKey) =>
+            s[key] === MODE.OFF &&
+            immediateDownstream(key).every((d) => s[d] === MODE.MANUAL || s[d] === MODE.DEFECT);
+
+          for (const k of promoted) {
+            for (const up of upstreamOf(k)) {
+              if (isReady(draft, up) && next[up] == null && prev[up] == null) {
+                next[up] = TIMER_SECONDS;
+              }
+            }
+          }
+
+          ORDER.forEach((k) => {
+            if (isReady(draft, k) && next[k] == null && prev[k] == null) {
               next[k] = TIMER_SECONDS;
             }
-          };
-
-          for (const k of expiredByDepth) {
-            const cur = state[k];
-
-            if (cur === MODE.OFF) {
-              if (draft[k] === MODE.OFF) {
-                draft[k] = MODE.AUTO;
-                interlockedThisTick.add(k);
-                if (timers[k] == null) schedule(k);
-              }
-              continue;
-            }
-
-            if (cur === MODE.AUTO) {
-              const ds = immediateDownstream(k);
-              const ready = ds.every((d) => state[d] === MODE.MANUAL || state[d] === MODE.DEFECT);
-
-              if (ready) {
-                draft[k] = MODE.MANUAL;
-                promotedThisTick.add(k);
-              } else {
-                schedule(k);
-              }
-            }
-          }
-
-          for (const k of promotedThisTick) {
-            for (const up of immediateUpstream(k)) {
-              const hasDefectBelow = downstreamOf(up).some((d) => draft[d] === MODE.DEFECT);
-
-              if (draft[up] === MODE.OFF && !hasDefectBelow) {
-                draft[up] = MODE.AUTO;
-                if (timers[up] == null) schedule(up);
-              } else if (draft[up] === MODE.AUTO) {
-                if (timers[up] == null) schedule(up);
-              }
-            }
-          }
-
-          for (const k of interlockedThisTick) {
-            for (const up of immediateUpstream(k)) {
-              const hasDefectBelow = downstreamOf(up).some((d) => draft[d] === MODE.DEFECT);
-
-              if (!hasDefectBelow) {
-                if (draft[up] === MODE.OFF) {
-                  if (timers[up] == null) schedule(up);
-                } else if (draft[up] === MODE.AUTO) {
-                  if (timers[up] == null) schedule(up);
-                }
-              }
-            }
-          }
+          });
 
           setState(draft);
           if (Object.keys(next).length === 0) setStartupRun(false);
@@ -546,45 +416,32 @@ function useInterlocks(
       return changed ? n : t;
     });
   }, [state, setTimers, shutdownRun, startupRun]);
-
-  const prevRef = useRef<StateRecord>(state);
-  useEffect(() => {
-    if (!shutdownRun) {
-      prevRef.current = state;
-      return;
-    }
-    const prev = prevRef.current;
-    ORDER.forEach((k) => {
-      const wasOn = prev[k] === MODE.MANUAL || prev[k] === MODE.AUTO;
-      const isOffNow = state[k] === MODE.OFF;
-      if (wasOn && isOffNow) {
-        setTimers((t) => {
-          const add = { ...t };
-          for (const d of immediateDownstream(k)) if (!add[d]) add[d] = TIMER_SECONDS;
-          return add;
-        });
-      }
-    });
-    prevRef.current = state;
-  }, [shutdownRun, state, setTimers]);
 }
 
 /* ======================= UI Helpers ======================= */
 
 function StatusDot({ mode }: { mode: Mode }) {
-  const cls =
-    mode === MODE.MANUAL
-      ? "bg-green-500 border-green-600"
-      : mode === MODE.AUTO
-      ? "bg-yellow-400 border-yellow-500"
-      : mode === MODE.DEFECT
-      ? "bg-red-500 border-red-600"
-      : "bg-white border-gray-300";
-  return <span className={["inline-block size-3 rounded-full border animate-pulse", cls].join(" ")} />;
+  if (mode === MODE.MANUAL) {
+    return (
+      <span className="relative flex size-3">
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-400 opacity-75"></span>
+        <span className="relative inline-flex size-3 rounded-full bg-green-500"></span>
+      </span>
+    );
+  }
+  if (mode === MODE.DEFECT) {
+    return (
+      <span className="relative flex size-3">
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-red-400 opacity-75"></span>
+        <span className="relative inline-flex size-3 rounded-full bg-red-500"></span>
+      </span>
+    );
+  }
+  return <span className="inline-block size-3 rounded-full bg-slate-300" />;
 }
 
 function modeToText(mode: Mode) {
-  return mode === MODE.MANUAL ? "Ligado" : mode === MODE.AUTO ? "Interlock" : mode === MODE.DEFECT ? "Defeito" : "Desligado";
+  return mode === MODE.MANUAL ? "Ligado" : mode === MODE.DEFECT ? "Defeito" : "Desligado";
 }
 
 const ITEM_COMMON = [
@@ -600,8 +457,6 @@ function buttonClasses(mode: Mode, disabled: boolean) {
   const byMode =
     mode === MODE.MANUAL
       ? "bg-green-50 border-green-200"
-      : mode === MODE.AUTO
-      ? "bg-yellow-50 border-yellow-200"
       : mode === MODE.DEFECT
       ? "bg-red-50 border-red-200"
       : "bg-white border-gray-200";
@@ -611,21 +466,8 @@ function buttonClasses(mode: Mode, disabled: boolean) {
 function badgeClasses(mode: Mode, disabled: boolean) {
   const base = [...ITEM_COMMON, disabled ? "cursor-not-allowed opacity-50" : "cursor-pointer hover:shadow-md"];
   const border =
-    mode === MODE.MANUAL
-      ? "border-green-500"
-      : mode === MODE.AUTO
-      ? "border-yellow-500"
-      : mode === MODE.DEFECT
-      ? "border-red-500"
-      : "border-slate-300";
-  const bg =
-    mode === MODE.MANUAL
-      ? "bg-green-50"
-      : mode === MODE.AUTO
-      ? "bg-yellow-50"
-      : mode === MODE.DEFECT
-      ? "bg-red-50"
-      : "bg-white";
+    mode === MODE.MANUAL ? "border-green-500" : mode === MODE.DEFECT ? "border-red-500" : "border-slate-300";
+  const bg = mode === MODE.MANUAL ? "bg-green-50" : mode === MODE.DEFECT ? "bg-red-50" : "bg-white";
   return [...base, border, bg].join(" ");
 }
 
@@ -655,7 +497,7 @@ function ToggleButton({ unitKey }: { unitKey: UnitKey }) {
     <button
       onClick={() => actions.clickButton(unitKey)}
       className={buttonClasses(mode, disabled)}
-      aria-pressed={mode === MODE.MANUAL || mode === MODE.AUTO}
+      aria-pressed={mode === MODE.MANUAL}
       aria-disabled={disabled}
       disabled={disabled}
       title={disabled ? "Desabilitado no modo AUTO" : undefined}
@@ -716,7 +558,7 @@ function ControlsList() {
 
       <ToggleButton unitKey="ValvulaRotativa01" />
       <ToggleButton unitKey="TransportadorCorreia02" />
-      <ToggleButton unitKey="CaliaVibratoria" />
+      <ToggleButton unitKey="PeneiraVibratoria01" />
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <ToggleButton unitKey="TransportadorCorreia03" />
@@ -738,7 +580,7 @@ function VisualList() {
 
       <ProcessBadge unitKey="ValvulaRotativa01" />
       <ProcessBadge unitKey="TransportadorCorreia02" />
-      <ProcessBadge unitKey="CaliaVibratoria" />
+      <ProcessBadge unitKey="PeneiraVibratoria01" />
 
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <ProcessBadge unitKey="TransportadorCorreia03" />
@@ -748,24 +590,28 @@ function VisualList() {
   );
 }
 
-/* ======================= UI: Grupo (AUTO / MANU) + On/Off ======================= */
+/* ======================= UI: Grupo + On/Off ======================= */
 
-function GroupSelector() {
+function GroupControlsBox() {
   const { groupMode, actions, timers } = useSystem();
   const isAuto = groupMode === GROUP_MODE.AUTO;
   const hasActiveTimers = Object.keys(timers).length > 0;
+  const powerDisabled = !isAuto || hasActiveTimers;
+
+  const commonBtn = "w-36 px-4 py-2 rounded-xl border text-sm transition text-center";
 
   return (
-    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4">
-      <h3 className="text-sm font-semibold mb-2 text-black">Grupo</h3>
-      <div className="flex gap-2">
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 w-full max-w-[760px] mx-auto">
+      <h3 className="font-semibold mb-4 text-black text-center">Grupo da moagem</h3>
+
+      <div className="flex w-full items-center justify-evenly">
         <button
           type="button"
           aria-pressed={isAuto}
           onClick={() => actions.setGroupMode(GROUP_MODE.AUTO)}
           disabled={hasActiveTimers}
           className={[
-            "px-3 py-1.5 rounded-xl border text-sm transition",
+            commonBtn,
             hasActiveTimers
               ? "bg-white text-slate-400 border-slate-200 cursor-not-allowed"
               : isAuto
@@ -775,13 +621,14 @@ function GroupSelector() {
         >
           Automático
         </button>
+
         <button
           type="button"
           aria-pressed={!isAuto}
           onClick={() => actions.setGroupMode(GROUP_MODE.MANU)}
           disabled={hasActiveTimers}
           className={[
-            "px-3 py-1.5 rounded-xl border text-sm transition",
+            commonBtn,
             hasActiveTimers
               ? "bg-white text-slate-400 border-slate-200 cursor-not-allowed"
               : !isAuto
@@ -791,40 +638,28 @@ function GroupSelector() {
         >
           Manual
         </button>
-      </div>
-      <p className="text-xs text-slate-500 mt-2">Espere os contadores terminarem para alterar.</p>
-    </div>
-  );
-}
 
-function GroupPowerBox() {
-  const { actions, groupMode, timers } = useSystem();
-  const disabled = groupMode !== GROUP_MODE.AUTO || Object.keys(timers).length > 0;
-
-  return (
-    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4">
-      <h3 className="text-sm font-semibold mb-2 text-black">On/Off</h3>
-      <div className="flex gap-2">
         <button
           type="button"
           onClick={actions.groupPowerOn}
-          disabled={disabled}
+          disabled={powerDisabled}
           className={[
-            "px-3 py-1.5 rounded-xl border text-sm transition",
-            disabled
+            commonBtn,
+            powerDisabled
               ? "bg-white text-slate-400 border-slate-200 cursor-not-allowed"
               : "bg-green-600 text-white border-green-700 hover:bg-green-700",
           ].join(" ")}
         >
           Ligar fluxo
         </button>
+
         <button
           type="button"
           onClick={actions.groupPowerOff}
-          disabled={disabled}
+          disabled={powerDisabled}
           className={[
-            "px-3 py-1.5 rounded-xl border text-sm transition",
-            disabled
+            commonBtn,
+            powerDisabled
               ? "bg-white text-slate-400 border-slate-200 cursor-not-allowed"
               : "bg-red-600 text-white border-red-700 hover:bg-red-700",
           ].join(" ")}
@@ -833,11 +668,12 @@ function GroupPowerBox() {
         </button>
       </div>
 
-      {groupMode !== GROUP_MODE.AUTO && (
-        <p className="text-xs text-slate-500 mt-2">
-          Disponível apenas quando o Grupo estiver em <strong>Automático</strong>.
-        </p>
-      )}
+      <div className="text-xs text-slate-500 mt-3 flex items-center justify-between">
+        <span>Só pode alterar o modo após finalizar os contadores.</span>
+        <span>
+          Botões disponíveis somente no modo <strong>Automático</strong>.
+        </span>
+      </div>
     </div>
   );
 }
@@ -851,15 +687,14 @@ export default function IndustrialFlowPanel() {
         <main className="mx-auto max-w-5xl">
           <header className="mb-6">
             <h1 className="text-2xl md:text-3xl font-bold tracking-tight text-black">
-              Fluxo Industrial (V1.6)
+              Fluxo da Moagem
             </h1>
             <p className="text-slate-700 mt-1">
-              Simulação de um fluxo industrial usando react com typescript.
+              Simulação de um fluxo industrial usando React com TypeScript.
             </p>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3">
-              <GroupSelector />
-              <GroupPowerBox />
+            <div className="grid grid-cols-1 gap-3 mt-3">
+              <GroupControlsBox />
             </div>
           </header>
 
@@ -874,7 +709,8 @@ export default function IndustrialFlowPanel() {
           </section>
 
           <p className="text-slate-700 mt-6">
-            No modo <strong>Automático</strong>, os controles individuais ficam desabilitados. Além disso, equipamentos <strong>Ligados</strong> passam a <strong>Interlock</strong>. Ao marcar <strong>Defeito</strong>, todos em <strong>Interlock</strong> acima desligam.
+            No modo <strong>Automático</strong>, os controles individuais ficam desabilitados.
+            Ao marcar um <strong>Defeito</strong>, todos os equipamentos acima desligam para evitar danos.
           </p>
         </main>
       </div>
