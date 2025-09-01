@@ -32,6 +32,8 @@ const ORDER = [
 type UnitKey = (typeof ORDER)[number];
 type StateRecord = Record<UnitKey, Mode>;
 type TimersRecord = Partial<Record<UnitKey, number>>;
+type PulsesRecord = Record<UnitKey, boolean>;
+type ManualRecord = Record<UnitKey, boolean>;
 
 const LABELS: Record<UnitKey, string> = {
   TransportadorCorreia01: "TC01",
@@ -61,6 +63,7 @@ interface SystemContextValue {
   groupMode: GroupMode;
   startupRun: boolean;
   shutdownRun: boolean;
+  pulses: PulsesRecord;
 }
 
 const SystemContext = createContext<SystemContextValue | null>(null);
@@ -68,11 +71,17 @@ const SystemContext = createContext<SystemContextValue | null>(null);
 function makeInitialState(): StateRecord {
   return Object.fromEntries(ORDER.map((k) => [k, MODE.OFF])) as StateRecord;
 }
+function makeInitialPulses(): PulsesRecord {
+  return Object.fromEntries(ORDER.map((k) => [k, false])) as PulsesRecord;
+}
+function makeInitialManual(): ManualRecord {
+  return Object.fromEntries(ORDER.map((k) => [k, false])) as ManualRecord;
+}
 
 function useSavedState<T>(key: string, initial: T) {
   const [val, setVal] = useState<T>(() => {
     try {
-      const raw = localStorage.getItem(key);
+      const raw = typeof window !== "undefined" ? localStorage.getItem(key) : null;
       return raw ? (JSON.parse(raw) as T) : initial;
     } catch {
       return initial;
@@ -86,13 +95,41 @@ function useSavedState<T>(key: string, initial: T) {
   return [val, setVal] as const;
 }
 
+function useEphemeralState<T>(initial: T) {
+  const [val, setVal] = useState<T>(initial);
+  return [val, setVal] as const;
+}
+
 function SystemProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useSavedState<StateRecord>("flow_state", makeInitialState());
-  const [timers, setTimers] = useSavedState<TimersRecord>("flow_timers", {});
+  const [timers, setTimers] = useEphemeralState<TimersRecord>({});
   const [groupMode, setGroupMode] = useSavedState<GroupMode>("flow_group_mode", GROUP_MODE.AUTO);
 
   const [shutdownRun, setShutdownRun] = useSavedState<boolean>("flow_shutdown_active", false);
   const [startupRun, setStartupRun] = useSavedState<boolean>("flow_startup_active", false);
+
+  const [pulses, setPulses] = useSavedState<PulsesRecord>("flow_pulses", makeInitialPulses());
+  const [manualOn, setManualOn] = useSavedState<ManualRecord>("flow_manual_on", makeInitialManual());
+
+  useEffect(() => {
+    const m1 = state.MoinhoMarteloM1;
+    const m2 = state.MoinhoMarteloM2;
+    if (m1 !== MODE.DEFECT && m2 !== MODE.DEFECT) {
+      const bothOn = m1 === MODE.MANUAL && m2 === MODE.MANUAL;
+      const bothOff = m1 === MODE.OFF && m2 === MODE.OFF;
+      if (!bothOn && !bothOff) {
+        setState((s) => ({ ...s, MoinhoMarteloM1: MODE.OFF, MoinhoMarteloM2: MODE.OFF }));
+        setManualOn((m) => ({ ...m, MoinhoMarteloM1: false, MoinhoMarteloM2: false }));
+        setPulses((p) => ({ ...p, MoinhoMarteloM1: false, MoinhoMarteloM2: false }));
+        setTimers((t) => {
+          const nt = { ...t };
+          delete nt.MoinhoMarteloM1;
+          delete nt.MoinhoMarteloM2;
+          return nt;
+        });
+      }
+    }
+  }, []);
 
   useInterlocksAndCascades(
     state,
@@ -103,7 +140,10 @@ function SystemProvider({ children }: { children: ReactNode }) {
     shutdownRun,
     setShutdownRun,
     startupRun,
-    setStartupRun
+    setStartupRun,
+    setPulses,
+    manualOn,
+    setManualOn
   );
 
   const actions = useMemo(
@@ -116,14 +156,31 @@ function SystemProvider({ children }: { children: ReactNode }) {
         groupMode,
         setGroupMode,
         setShutdownRun,
-        setStartupRun
+        setStartupRun,
+        pulses,
+        setPulses,
+        manualOn,
+        setManualOn
       ),
-    [state, timers, groupMode, setShutdownRun, setStartupRun, setGroupMode, setState, setTimers]
+    [
+      state,
+      timers,
+      groupMode,
+      setShutdownRun,
+      setStartupRun,
+      setGroupMode,
+      setState,
+      setTimers,
+      pulses,
+      setPulses,
+      manualOn,
+      setManualOn,
+    ]
   );
 
   const value = useMemo<SystemContextValue>(
-    () => ({ state, actions, timers, groupMode, startupRun, shutdownRun }),
-    [state, actions, timers, groupMode, startupRun, shutdownRun]
+    () => ({ state, actions, timers, groupMode, startupRun, shutdownRun, pulses }),
+    [state, actions, timers, groupMode, startupRun, shutdownRun, pulses]
   );
 
   return <SystemContext.Provider value={value}>{children}</SystemContext.Provider>;
@@ -169,6 +226,30 @@ function topmostOnSeeds(s: StateRecord): UnitKey[] {
   return seeds;
 }
 
+const isMill = (k: UnitKey) => k === "MoinhoMarteloM1" || k === "MoinhoMarteloM2";
+const siblingMill = (k: UnitKey): UnitKey => (k === "MoinhoMarteloM1" ? "MoinhoMarteloM2" : "MoinhoMarteloM1");
+
+function anyDefectDownstream(s: StateRecord, key: UnitKey): boolean {
+  const visited = new Set<UnitKey>();
+  const queue = [...immediateDownstream(key)];
+  while (queue.length) {
+    const cur = queue.shift() as UnitKey;
+    if (visited.has(cur)) continue;
+    visited.add(cur);
+    if (s[cur] === MODE.DEFECT) return true;
+    queue.push(...immediateDownstream(cur));
+  }
+  return false;
+}
+
+function withMillPair(keys: UnitKey[]): UnitKey[] {
+  const set = new Set<UnitKey>(keys);
+  keys.forEach((k) => {
+    if (isMill(k)) set.add(siblingMill(k));
+  });
+  return Array.from(set);
+}
+
 /* ======================= Ações e Grupo ======================= */
 
 function createActions(
@@ -179,7 +260,11 @@ function createActions(
   groupMode: GroupMode,
   setGroupMode: React.Dispatch<React.SetStateAction<GroupMode>>,
   setShutdownRun: React.Dispatch<React.SetStateAction<boolean>>,
-  setStartupRun: React.Dispatch<React.SetStateAction<boolean>>
+  setStartupRun: React.Dispatch<React.SetStateAction<boolean>>,
+  pulses: PulsesRecord,
+  setPulses: React.Dispatch<React.SetStateAction<PulsesRecord>>,
+  manualOn: ManualRecord,
+  setManualOn: React.Dispatch<React.SetStateAction<ManualRecord>>
 ): Actions {
   const hasActiveTimers = () => Object.keys(timers).length > 0;
   const isDefect = (k: UnitKey) => state[k] === MODE.DEFECT;
@@ -187,29 +272,87 @@ function createActions(
   const addTimers = (keys: UnitKey[]) =>
     setTimers((t) => {
       const next: TimersRecord = { ...t };
-      keys.forEach((k) => (next[k] = TIMER_SECONDS));
+      withMillPair(keys).forEach((k) => (next[k] = TIMER_SECONDS));
       return next;
     });
 
   const clearTimersFor = (keys: UnitKey[]) =>
     setTimers((t) => {
       const n = { ...t };
-      keys.forEach((k) => delete n[k]);
+      withMillPair(keys).forEach((k) => delete n[k]);
       return n;
     });
 
+  const clearAllPulses = () => setPulses(makeInitialPulses());
+
+  const isReadyToTurnOn = (s: StateRecord, key: UnitKey) => {
+    if (s[key] !== MODE.OFF) return false;
+    if (isMill(key)) {
+      const other = siblingMill(key);
+      if (s[other] === MODE.DEFECT) return false;
+    }
+    if (anyDefectDownstream(s, key)) return false;
+    return immediateDownstream(key).every((d) => s[d] === MODE.MANUAL || s[d] === MODE.DEFECT);
+  };
+
   const setGroupModeSafe = (nextMode: GroupMode) => {
     if (hasActiveTimers()) return;
+
     if (nextMode === GROUP_MODE.MANU) {
       setStartupRun(false);
       setShutdownRun(false);
       setTimers({});
+      setGroupMode(nextMode);
+      return;
     }
-    setGroupMode(nextMode);
-  };
 
-  const isReadyToTurnOn = (s: StateRecord, key: UnitKey) =>
-    s[key] === MODE.OFF && immediateDownstream(key).every((d) => s[d] === MODE.MANUAL || s[d] === MODE.DEFECT);
+    setShutdownRun(false);
+    setStartupRun(true);
+    setGroupMode(nextMode);
+    clearAllPulses();
+
+    const draft: StateRecord = { ...state };
+    const turnedOff: UnitKey[] = [];
+
+    for (const k of ORDER) {
+      if (draft[k] === MODE.MANUAL && !manualOn[k]) {
+        const siblingBlocked = isMill(k) && draft[siblingMill(k)] === MODE.DEFECT;
+        const defectBelow = anyDefectDownstream(draft, k);
+        if (siblingBlocked || defectBelow) {
+          draft[k] = MODE.OFF;
+          turnedOff.push(k);
+        }
+      }
+    }
+
+    const toSchedule: UnitKey[] = [];
+    ORDER.forEach((k) => {
+      if (isReadyToTurnOn(draft, k)) toSchedule.push(k);
+    });
+
+    setState(draft);
+    if (turnedOff.length) {
+      setManualOn((m) => {
+        const nm = { ...m };
+        turnedOff.forEach((k) => (nm[k] = false));
+        return nm;
+      });
+    }
+
+    const anyOn = ORDER.some((k) => draft[k] === MODE.MANUAL);
+    if (!anyOn) {
+      setStartupRun(false);
+      setTimers({});
+      return;
+    }
+
+    if (toSchedule.length) {
+      setTimers(Object.fromEntries(withMillPair(toSchedule).map((k) => [k, TIMER_SECONDS])) as TimersRecord);
+    } else {
+      setStartupRun(false);
+      setTimers({});
+    }
+  };
 
   const groupPowerOn = () => {
     if (groupMode !== GROUP_MODE.AUTO) return;
@@ -224,7 +367,7 @@ function createActions(
     });
 
     if (toSchedule.length) {
-      setTimers(Object.fromEntries(toSchedule.map((k) => [k, TIMER_SECONDS])) as TimersRecord);
+      setTimers(Object.fromEntries(withMillPair(toSchedule).map((k) => [k, TIMER_SECONDS])) as TimersRecord);
     } else {
       setStartupRun(false);
       setTimers({});
@@ -240,28 +383,40 @@ function createActions(
 
     setStartupRun(false);
     setShutdownRun(true);
-    addTimers(seeds);
+    addTimers(withMillPair(seeds));
   };
 
   const clickManualOnly = (key: UnitKey) => {
     if (isDefect(key)) return;
 
-    if (key === "MoinhoMarteloM1" || key === "MoinhoMarteloM2") {
+    if (isMill(key)) {
       const self = key;
-      const other: UnitKey = key === "MoinhoMarteloM1" ? "MoinhoMarteloM2" : "MoinhoMarteloM1";
+      const other: UnitKey = siblingMill(key);
+      if (isDefect(other)) return;
       setState((s) => {
         const nextSelf = s[self] === MODE.MANUAL ? MODE.OFF : MODE.MANUAL;
         const next: StateRecord = { ...s, [self]: nextSelf, [other]: nextSelf };
         return next;
+      });
+      setManualOn((m) => {
+        const nextOn = !(state[key] === MODE.MANUAL);
+        return { ...m, [self]: nextOn, [other]: nextOn };
+      });
+      setPulses((p) => {
+        const nextOn = !(state[key] === MODE.MANUAL);
+        return { ...p, [self]: nextOn, [other]: nextOn };
       });
       clearTimersFor([key, other, ...upstreamOf(key), ...upstreamOf(other)]);
       return;
     }
 
     setState((s) => {
-      const next: StateRecord = { ...s, [key]: s[key] === MODE.MANUAL ? MODE.OFF : MODE.MANUAL };
+      const nextOn = s[key] !== MODE.MANUAL;
+      const next: StateRecord = { ...s, [key]: nextOn ? MODE.MANUAL : MODE.OFF };
       return next;
     });
+    setManualOn((m) => ({ ...m, [key]: state[key] !== MODE.MANUAL }));
+    setPulses((p) => ({ ...p, [key]: state[key] !== MODE.MANUAL }));
     clearTimersFor([key, ...upstreamOf(key)]);
   };
 
@@ -274,19 +429,31 @@ function createActions(
     if (groupMode === GROUP_MODE.AUTO) return;
     const willBeDefect = state[key] !== MODE.DEFECT;
 
+    let turnedOff: UnitKey[] = [];
+
     setState((s) => {
       const next: StateRecord = { ...s, [key]: willBeDefect ? MODE.DEFECT : MODE.OFF };
 
       if (willBeDefect) {
         const ups = upstreamOf(key);
-
         const filteredUps =
           key === "TransportadorCorreia04" && s["TransportadorCorreia03"] === MODE.MANUAL
             ? ups.filter((u) => u !== "TransportadorCorreia03")
             : ups;
 
         for (const up of filteredUps) {
-          if (next[up] !== MODE.DEFECT) next[up] = MODE.OFF;
+          if (next[up] !== MODE.DEFECT && !manualOn[up]) {
+            next[up] = MODE.OFF;
+            turnedOff.push(up);
+          }
+        }
+
+        if (isMill(key)) {
+          const other = siblingMill(key);
+          if (next[other] === MODE.MANUAL && !manualOn[other]) {
+            next[other] = MODE.OFF;
+            turnedOff.push(other);
+          }
         }
       }
 
@@ -294,13 +461,21 @@ function createActions(
     });
 
     if (willBeDefect) {
-      const ups = upstreamOf(key);
-      const filteredUps =
-        key === "TransportadorCorreia04" && state["TransportadorCorreia03"] === MODE.MANUAL
-          ? ups.filter((u) => u !== "TransportadorCorreia03")
-          : ups;
-
-      clearTimersFor(filteredUps);
+      if (turnedOff.length) {
+        clearTimersFor(turnedOff);
+        setPulses((p) => {
+          const np = { ...p };
+          for (const u of [...turnedOff, key]) np[u] = false;
+          return np;
+        });
+        setManualOn((m) => {
+          const nm = { ...m };
+          for (const u of turnedOff) nm[u] = false;
+          return nm;
+        });
+      } else {
+        setPulses((p) => ({ ...p, [key]: false }));
+      }
     }
   };
 
@@ -318,7 +493,10 @@ function useInterlocksAndCascades(
   shutdownRun: boolean,
   setShutdownRun: React.Dispatch<React.SetStateAction<boolean>>,
   startupRun: boolean,
-  setStartupRun: React.Dispatch<React.SetStateAction<boolean>>
+  setStartupRun: React.Dispatch<React.SetStateAction<boolean>>,
+  setPulses: React.Dispatch<React.SetStateAction<PulsesRecord>>,
+  manualOn: ManualRecord,
+  setManualOn: React.Dispatch<React.SetStateAction<ManualRecord>>
 ) {
   useEffect(() => {
     if (!Object.keys(timers).length) return;
@@ -332,18 +510,30 @@ function useInterlocksAndCascades(
           if (nv <= 0) expired.push(k);
           else nextBase[k] = nv;
         }
+        const expiredAll = withMillPair(expired);
 
         if (shutdownRun) {
           const next: TimersRecord = { ...nextBase };
 
-          if (expired.length) {
+          if (expiredAll.length) {
             const draft: StateRecord = { ...state };
-            for (const k of expired) {
+            for (const k of expiredAll) {
               if (draft[k] === MODE.MANUAL) draft[k] = MODE.OFF;
             }
             setState(draft);
 
-            for (const k of expired) {
+            setPulses((p) => {
+              const np = { ...p };
+              for (const k of expiredAll) np[k] = false;
+              return np;
+            });
+            setManualOn((m) => {
+              const nm = { ...m };
+              for (const k of expiredAll) nm[k] = false;
+              return nm;
+            });
+
+            for (const k of expiredAll) {
               for (const d of immediateDownstream(k)) {
                 if (next[d] == null && prev[d] == null && state[d] === MODE.MANUAL) {
                   next[d] = TIMER_SECONDS;
@@ -365,15 +555,30 @@ function useInterlocksAndCascades(
           const draft: StateRecord = { ...state };
           const promoted = new Set<UnitKey>();
 
-          for (const k of expired) {
+          for (const k of expiredAll) {
             if (draft[k] === MODE.OFF) {
               draft[k] = MODE.MANUAL;
               promoted.add(k);
             }
           }
 
+          if (promoted.size) {
+            setPulses((p) => {
+              const np = { ...p };
+              for (const k of promoted) np[k] = false;
+              return np;
+            });
+            setManualOn((m) => {
+              const nm = { ...m };
+              for (const k of promoted) nm[k] = false;
+              return nm;
+            });
+          }
+
           const isReady = (s: StateRecord, key: UnitKey) =>
             s[key] === MODE.OFF &&
+            (!isMill(key) || s[siblingMill(key)] !== MODE.DEFECT) &&
+            !anyDefectDownstream(s, key) &&
             immediateDownstream(key).every((d) => s[d] === MODE.MANUAL || s[d] === MODE.DEFECT);
 
           for (const k of promoted) {
@@ -400,7 +605,18 @@ function useInterlocksAndCascades(
     }, 1000);
 
     return () => clearInterval(id);
-  }, [timers, setTimers, setState, shutdownRun, startupRun, state, setShutdownRun, setStartupRun]);
+  }, [
+    timers,
+    setTimers,
+    setState,
+    shutdownRun,
+    startupRun,
+    state,
+    setShutdownRun,
+    setStartupRun,
+    setPulses,
+    setManualOn,
+  ]);
 
   useEffect(() => {
     if (shutdownRun || startupRun) return;
@@ -420,22 +636,20 @@ function useInterlocksAndCascades(
 
 /* ======================= UI Helpers ======================= */
 
-function StatusDot({ mode }: { mode: Mode }) {
+function StatusDot({ mode, pulsing }: { mode: Mode; pulsing: boolean }) {
   if (mode === MODE.MANUAL) {
-    return (
-      <span className="relative flex size-3">
-        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-400 opacity-75"></span>
-        <span className="relative inline-flex size-3 rounded-full bg-green-500"></span>
-      </span>
-    );
+    if (pulsing) {
+      return (
+        <span className="relative flex size-3">
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-green-400 opacity-75"></span>
+          <span className="relative inline-flex size-3 rounded-full bg-green-500"></span>
+        </span>
+      );
+    }
+    return <span className="inline-block size-3 rounded-full bg-green-500" />;
   }
   if (mode === MODE.DEFECT) {
-    return (
-      <span className="relative flex size-3">
-        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-red-400 opacity-75"></span>
-        <span className="relative inline-flex size-3 rounded-full bg-red-500"></span>
-      </span>
-    );
+    return <span className="inline-block size-3 rounded-full bg-red-500" />;
   }
   return <span className="inline-block size-3 rounded-full bg-slate-300" />;
 }
@@ -477,10 +691,7 @@ function Countdown({ unitKey }: { unitKey: UnitKey }) {
   if (remaining == null) return null;
 
   return (
-    <span
-      className="text-[10px] ml-2 px-1.5 py-0.5 rounded bg-slate-100 border text-slate-600"
-      title="Mudança em"
-    >
+    <span className="text-[10px] ml-2 px-1.5 py-0.5 rounded bg-slate-100 border text-slate-600" title="Mudança em">
       {remaining}s
     </span>
   );
@@ -489,9 +700,10 @@ function Countdown({ unitKey }: { unitKey: UnitKey }) {
 /* ======================= UI: Controles e Processos ======================= */
 
 function ToggleButton({ unitKey }: { unitKey: UnitKey }) {
-  const { state, actions, groupMode } = useSystem();
+  const { state, actions, groupMode, pulses } = useSystem();
   const mode = state[unitKey];
   const disabled = mode === MODE.DEFECT || groupMode === GROUP_MODE.AUTO;
+  const pulsing = groupMode === GROUP_MODE.AUTO ? false : !!pulses[unitKey] && mode === MODE.MANUAL;
 
   return (
     <button
@@ -503,7 +715,7 @@ function ToggleButton({ unitKey }: { unitKey: UnitKey }) {
       title={disabled ? "Desabilitado no modo AUTO" : undefined}
     >
       <div className="flex items-center gap-3">
-        <StatusDot mode={mode} />
+        <StatusDot mode={mode} pulsing={pulsing} />
         <span className="font-medium text-black">{LABELS[unitKey]}</span>
       </div>
       <div className="flex items-center">
@@ -515,9 +727,10 @@ function ToggleButton({ unitKey }: { unitKey: UnitKey }) {
 }
 
 function ProcessBadge({ unitKey }: { unitKey: UnitKey }) {
-  const { state, actions, groupMode } = useSystem();
+  const { state, actions, groupMode, pulses } = useSystem();
   const mode = state[unitKey];
   const disabled = groupMode === GROUP_MODE.AUTO;
+  const pulsing = groupMode === GROUP_MODE.AUTO ? false : !!pulses[unitKey] && mode === MODE.MANUAL;
 
   return (
     <div
@@ -533,7 +746,7 @@ function ProcessBadge({ unitKey }: { unitKey: UnitKey }) {
       }
     >
       <div className="flex items-center gap-3">
-        <StatusDot mode={mode} />
+        <StatusDot mode={mode} pulsing={pulsing} />
         <span className="font-medium text-black">{LABELS[unitKey]}</span>
       </div>
       <div className="flex items-center">
@@ -686,12 +899,8 @@ export default function IndustrialFlowPanel() {
       <div className="min-h-screen w-full bg-gradient-to-b from-slate-50 to-slate-100 p-6">
         <main className="mx-auto max-w-5xl">
           <header className="mb-6">
-            <h1 className="text-2xl md:text-3xl font-bold tracking-tight text-black">
-              Fluxo da Moagem
-            </h1>
-            <p className="text-slate-700 mt-1">
-              Simulação de um fluxo industrial usando React com TypeScript.
-            </p>
+            <h1 className="text-2xl md:text-3xl font-bold tracking-tight text-black">Fluxo da Moagem</h1>
+            <p className="text-slate-700 mt-1">Simulação de um fluxo industrial usando React com TypeScript.</p>
 
             <div className="grid grid-cols-1 gap-3 mt-3">
               <GroupControlsBox />
@@ -709,8 +918,8 @@ export default function IndustrialFlowPanel() {
           </section>
 
           <p className="text-slate-700 mt-6">
-            No modo <strong>Automático</strong>, os controles individuais ficam desabilitados.
-            Ao marcar um <strong>Defeito</strong>, todos os equipamentos acima desligam para evitar danos.
+            No modo <strong>Automático</strong>, os controles individuais ficam desabilitados. Ao marcar um{" "}
+            <strong>Defeito</strong>, todos os equipamentos acima desligam para evitar danos.
           </p>
         </main>
       </div>
