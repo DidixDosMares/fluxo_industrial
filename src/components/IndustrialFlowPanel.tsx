@@ -129,7 +129,14 @@ function SystemProvider({ children }: { children: ReactNode }) {
         });
       }
     }
-  }, []);
+  }, [
+    setState,
+    setManualOn,
+    setPulses,
+    setTimers,
+    state.MoinhoMarteloM1,
+    state.MoinhoMarteloM2,
+  ]);
 
   useInterlocksAndCascades(
     state,
@@ -429,7 +436,7 @@ function createActions(
     if (groupMode === GROUP_MODE.AUTO) return;
     const willBeDefect = state[key] !== MODE.DEFECT;
 
-    let turnedOff: UnitKey[] = [];
+    const turnedOff: UnitKey[] = [];
 
     setState((s) => {
       const next: StateRecord = { ...s, [key]: willBeDefect ? MODE.DEFECT : MODE.OFF };
