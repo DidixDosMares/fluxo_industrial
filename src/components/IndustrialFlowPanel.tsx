@@ -46,7 +46,7 @@ const LABELS: Record<UnitKey, string> = {
   TransportadorCorreia04: "TC04",
 };
 
-/* ======================= Contexto do Sistema ======================= */
+/* ======================= Contexto ======================= */
 
 interface Actions {
   clickButton: (key: UnitKey) => void;
@@ -68,31 +68,52 @@ interface SystemContextValue {
 
 const SystemContext = createContext<SystemContextValue | null>(null);
 
-function makeInitialState(): StateRecord {
-  return Object.fromEntries(ORDER.map((k) => [k, MODE.OFF])) as StateRecord;
-}
-function makeInitialPulses(): PulsesRecord {
-  return Object.fromEntries(ORDER.map((k) => [k, false])) as PulsesRecord;
-}
-function makeInitialManual(): ManualRecord {
-  return Object.fromEntries(ORDER.map((k) => [k, false])) as ManualRecord;
-}
+const makeInitialState = (): StateRecord =>
+  Object.fromEntries(ORDER.map((k) => [k, MODE.OFF])) as StateRecord;
+const makeInitialPulses = (): PulsesRecord =>
+  Object.fromEntries(ORDER.map((k) => [k, false])) as PulsesRecord;
+const makeInitialManual = (): ManualRecord =>
+  Object.fromEntries(ORDER.map((k) => [k, false])) as ManualRecord;
 
-function useSavedState<T>(key: string, initial: T) {
-  const [val, setVal] = useState<T>(() => {
-    try {
-      const raw = typeof window !== "undefined" ? localStorage.getItem(key) : null;
-      return raw ? (JSON.parse(raw) as T) : initial;
-    } catch {
-      return initial;
-    }
-  });
+/* ======================= Persistência hydration-safe ======================= */
+
+const isGroupMode = (v: unknown): v is GroupMode => v === "auto" || v === "manu";
+const isBoolean = (v: unknown): v is boolean => typeof v === "boolean";
+const isStateRecord = (v: unknown): v is StateRecord =>
+  typeof v === "object" &&
+  v != null &&
+  ORDER.every(
+    (k) => (v as any)[k] === "off" || (v as any)[k] === "manual" || (v as any)[k] === "defect"
+  );
+const isPulses = (v: unknown): v is PulsesRecord =>
+  typeof v === "object" && v != null && ORDER.every((k) => typeof (v as any)[k] === "boolean");
+const isManual = (v: unknown): v is ManualRecord =>
+  typeof v === "object" && v != null && ORDER.every((k) => typeof (v as any)[k] === "boolean");
+
+function useSavedState<T>(key: string, initial: T, validate?: (v: unknown) => v is T) {
+  const [hydrated, setHydrated] = useState(false);
+  const [val, setVal] = useState<T>(initial);
+
   useEffect(() => {
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw != null) {
+        const parsed = JSON.parse(raw);
+        if (!validate || validate(parsed)) setVal(parsed as T);
+        else localStorage.removeItem(key);
+      }
+    } catch {}
+    setHydrated(true);
+  }, [key]);
+
+  useEffect(() => {
+    if (!hydrated) return;
     try {
       localStorage.setItem(key, JSON.stringify(val));
     } catch {}
-  }, [key, val]);
-  return [val, setVal] as const;
+  }, [key, val, hydrated]);
+
+  return [val, setVal, hydrated] as const;
 }
 
 function useEphemeralState<T>(initial: T) {
@@ -100,18 +121,51 @@ function useEphemeralState<T>(initial: T) {
   return [val, setVal] as const;
 }
 
+/* ======================= Provider ======================= */
+
 function SystemProvider({ children }: { children: ReactNode }) {
-  const [state, setState] = useSavedState<StateRecord>("flow_state", makeInitialState());
+  const [state, setState, stateHydrated] = useSavedState<StateRecord>(
+    "flow_state",
+    makeInitialState(),
+    isStateRecord
+  );
   const [timers, setTimers] = useEphemeralState<TimersRecord>({});
-  const [groupMode, setGroupMode] = useSavedState<GroupMode>("flow_group_mode", GROUP_MODE.AUTO);
+  const [groupMode, setGroupMode, groupModeHydrated] = useSavedState<GroupMode>(
+    "flow_group_mode",
+    GROUP_MODE.AUTO,
+    isGroupMode
+  );
+  const [shutdownRun, setShutdownRun, shutdownHydrated] = useSavedState<boolean>(
+    "flow_shutdown_active",
+    false,
+    isBoolean
+  );
+  const [startupRun, setStartupRun, startupHydrated] = useSavedState<boolean>(
+    "flow_startup_active",
+    false,
+    isBoolean
+  );
+  const [pulses, setPulses, pulsesHydrated] = useSavedState<PulsesRecord>(
+    "flow_pulses",
+    makeInitialPulses(),
+    isPulses
+  );
+  const [manualOn, setManualOn, manualHydrated] = useSavedState<ManualRecord>(
+    "flow_manual_on",
+    makeInitialManual(),
+    isManual
+  );
 
-  const [shutdownRun, setShutdownRun] = useSavedState<boolean>("flow_shutdown_active", false);
-  const [startupRun, setStartupRun] = useSavedState<boolean>("flow_startup_active", false);
-
-  const [pulses, setPulses] = useSavedState<PulsesRecord>("flow_pulses", makeInitialPulses());
-  const [manualOn, setManualOn] = useSavedState<ManualRecord>("flow_manual_on", makeInitialManual());
+  const hydrated =
+    stateHydrated &&
+    groupModeHydrated &&
+    shutdownHydrated &&
+    startupHydrated &&
+    pulsesHydrated &&
+    manualHydrated;
 
   useEffect(() => {
+    if (!hydrated) return;
     const m1 = state.MoinhoMarteloM1;
     const m2 = state.MoinhoMarteloM2;
     if (m1 !== MODE.DEFECT && m2 !== MODE.DEFECT) {
@@ -130,6 +184,7 @@ function SystemProvider({ children }: { children: ReactNode }) {
       }
     }
   }, [
+    hydrated,
     setState,
     setManualOn,
     setPulses,
@@ -153,6 +208,7 @@ function SystemProvider({ children }: { children: ReactNode }) {
     setManualOn
   );
 
+  // NÃO dar return antes dos hooks; crie os memos sempre
   const actions = useMemo(
     () =>
       createActions(
@@ -190,7 +246,11 @@ function SystemProvider({ children }: { children: ReactNode }) {
     [state, actions, timers, groupMode, startupRun, shutdownRun, pulses]
   );
 
-  return <SystemContext.Provider value={value}>{children}</SystemContext.Provider>;
+  return (
+    <SystemContext.Provider value={value}>
+      {hydrated ? children : null}
+    </SystemContext.Provider>
+  );
 }
 
 function useSystem(): SystemContextValue {
@@ -199,7 +259,7 @@ function useSystem(): SystemContextValue {
   return ctx;
 }
 
-/* ======================= Helpers de Topologia ======================= */
+/* ======================= Topologia ======================= */
 
 const idxOf = (k: UnitKey) => ORDER.indexOf(k);
 const upstreamOf = (key: UnitKey): UnitKey[] => ORDER.slice(0, idxOf(key)) as UnitKey[];
@@ -223,16 +283,6 @@ const immediateDownstream = (key: UnitKey): UnitKey[] => {
 };
 
 const isOnMode = (m: Mode) => m === MODE.MANUAL;
-
-function topmostOnSeeds(s: StateRecord): UnitKey[] {
-  const seeds: UnitKey[] = [];
-  for (const k of ORDER) {
-    if (!isOnMode(s[k])) continue;
-    if (!upstreamOf(k).some((u) => isOnMode(s[u]))) seeds.push(k);
-  }
-  return seeds;
-}
-
 const isMill = (k: UnitKey) => k === "MoinhoMarteloM1" || k === "MoinhoMarteloM2";
 const siblingMill = (k: UnitKey): UnitKey => (k === "MoinhoMarteloM1" ? "MoinhoMarteloM2" : "MoinhoMarteloM1");
 
@@ -314,7 +364,6 @@ function createActions(
     }
 
     setShutdownRun(false);
-    setStartupRun(true);
     setGroupMode(nextMode);
     clearAllPulses();
 
@@ -347,16 +396,11 @@ function createActions(
     }
 
     const anyOn = ORDER.some((k) => draft[k] === MODE.MANUAL);
-    if (!anyOn) {
-      setStartupRun(false);
-      setTimers({});
-      return;
-    }
+    setStartupRun(anyOn);
 
-    if (toSchedule.length) {
+    if (anyOn && toSchedule.length) {
       setTimers(Object.fromEntries(withMillPair(toSchedule).map((k) => [k, TIMER_SECONDS])) as TimersRecord);
     } else {
-      setStartupRun(false);
       setTimers({});
     }
   };
@@ -364,6 +408,9 @@ function createActions(
   const groupPowerOn = () => {
     if (groupMode !== GROUP_MODE.AUTO) return;
     if (hasActiveTimers()) return;
+
+    const anyOn = ORDER.some((k) => state[k] === MODE.MANUAL);
+    if (!anyOn) return;
 
     setShutdownRun(false);
     setStartupRun(true);
@@ -376,7 +423,6 @@ function createActions(
     if (toSchedule.length) {
       setTimers(Object.fromEntries(withMillPair(toSchedule).map((k) => [k, TIMER_SECONDS])) as TimersRecord);
     } else {
-      setStartupRun(false);
       setTimers({});
     }
   };
@@ -385,7 +431,14 @@ function createActions(
     if (groupMode !== GROUP_MODE.AUTO) return;
     if (hasActiveTimers()) return;
 
-    const seeds = topmostOnSeeds(state);
+    const seeds: UnitKey[] = [];
+    for (const k of ORDER) {
+      if (state[k] !== MODE.MANUAL) continue;
+      const ups = ORDER.slice(0, ORDER.indexOf(k)) as UnitKey[];
+      const anyUpOn = ups.some((u) => state[u] === MODE.MANUAL);
+      if (!anyUpOn) seeds.push(k);
+    }
+
     if (!seeds.length) return;
 
     setStartupRun(false);
@@ -435,31 +488,29 @@ function createActions(
   const toggleDefect = (key: UnitKey) => {
     if (groupMode === GROUP_MODE.AUTO) return;
     const willBeDefect = state[key] !== MODE.DEFECT;
-
-    const turnedOff: UnitKey[] = [];
+    const toTurnOff: UnitKey[] = [];
 
     setState((s) => {
       const next: StateRecord = { ...s, [key]: willBeDefect ? MODE.DEFECT : MODE.OFF };
 
       if (willBeDefect) {
-        const ups = upstreamOf(key);
-        const filteredUps =
-          key === "TransportadorCorreia04" && s["TransportadorCorreia03"] === MODE.MANUAL
-            ? ups.filter((u) => u !== "TransportadorCorreia03")
-            : ups;
+        const ups =
+          key === "TransportadorCorreia04"
+            ? upstreamOf(key).filter((u) => u !== "TransportadorCorreia03")
+            : upstreamOf(key);
 
-        for (const up of filteredUps) {
-          if (next[up] !== MODE.DEFECT && !manualOn[up]) {
+        for (const up of ups) {
+          if (next[up] !== MODE.DEFECT) {
             next[up] = MODE.OFF;
-            turnedOff.push(up);
+            toTurnOff.push(up);
           }
         }
 
         if (isMill(key)) {
           const other = siblingMill(key);
-          if (next[other] === MODE.MANUAL && !manualOn[other]) {
+          if (next[other] === MODE.MANUAL) {
             next[other] = MODE.OFF;
-            turnedOff.push(other);
+            toTurnOff.push(other);
           }
         }
       }
@@ -468,16 +519,16 @@ function createActions(
     });
 
     if (willBeDefect) {
-      if (turnedOff.length) {
-        clearTimersFor(turnedOff);
+      if (toTurnOff.length) {
+        clearTimersFor(toTurnOff);
         setPulses((p) => {
           const np = { ...p };
-          for (const u of [...turnedOff, key]) np[u] = false;
+          for (const u of [...toTurnOff, key]) np[u] = false;
           return np;
         });
         setManualOn((m) => {
           const nm = { ...m };
-          for (const u of turnedOff) nm[u] = false;
+          for (const u of toTurnOff) nm[u] = false;
           return nm;
         });
       } else {
@@ -489,7 +540,7 @@ function createActions(
   return { clickButton, toggleDefect, setGroupMode: setGroupModeSafe, groupPowerOn, groupPowerOff };
 }
 
-/* ======================= Cascatas (ligar/desligar) ======================= */
+/* ======================= Cascatas ======================= */
 
 function useInterlocksAndCascades(
   state: StateRecord,
@@ -524,9 +575,7 @@ function useInterlocksAndCascades(
 
           if (expiredAll.length) {
             const draft: StateRecord = { ...state };
-            for (const k of expiredAll) {
-              if (draft[k] === MODE.MANUAL) draft[k] = MODE.OFF;
-            }
+            for (const k of expiredAll) if (draft[k] === MODE.MANUAL) draft[k] = MODE.OFF;
             setState(draft);
 
             setPulses((p) => {
@@ -535,7 +584,7 @@ function useInterlocksAndCascades(
               return np;
             });
             setManualOn((m) => {
-              const nm = { ...m };
+              const nm = { ...(m as any) };
               for (const k of expiredAll) nm[k] = false;
               return nm;
             });
@@ -576,7 +625,7 @@ function useInterlocksAndCascades(
               return np;
             });
             setManualOn((m) => {
-              const nm = { ...m };
+              const nm = { ...(m as any) };
               for (const k of promoted) nm[k] = false;
               return nm;
             });
@@ -641,7 +690,7 @@ function useInterlocksAndCascades(
   }, [state, setTimers, shutdownRun, startupRun]);
 }
 
-/* ======================= UI Helpers ======================= */
+/* ======================= UI ======================= */
 
 function StatusDot({ mode, pulsing }: { mode: Mode; pulsing: boolean }) {
   if (mode === MODE.MANUAL) {
@@ -696,15 +745,12 @@ function Countdown({ unitKey }: { unitKey: UnitKey }) {
   const { timers } = useSystem();
   const remaining = timers[unitKey];
   if (remaining == null) return null;
-
   return (
     <span className="text-[10px] ml-2 px-1.5 py-0.5 rounded bg-slate-100 border text-slate-600" title="Mudança em">
       {remaining}s
     </span>
   );
 }
-
-/* ======================= UI: Controles e Processos ======================= */
 
 function ToggleButton({ unitKey }: { unitKey: UnitKey }) {
   const { state, actions, groupMode, pulses } = useSystem();
@@ -764,22 +810,17 @@ function ProcessBadge({ unitKey }: { unitKey: UnitKey }) {
   );
 }
 
-/* ======================= UI: Listas ======================= */
-
 function ControlsList() {
   return (
     <div className="space-y-3">
       <ToggleButton unitKey="TransportadorCorreia01" />
-
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <ToggleButton unitKey="MoinhoMarteloM1" />
         <ToggleButton unitKey="MoinhoMarteloM2" />
       </div>
-
       <ToggleButton unitKey="ValvulaRotativa01" />
       <ToggleButton unitKey="TransportadorCorreia02" />
       <ToggleButton unitKey="PeneiraVibratoria01" />
-
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <ToggleButton unitKey="TransportadorCorreia03" />
         <ToggleButton unitKey="TransportadorCorreia04" />
@@ -792,16 +833,13 @@ function VisualList() {
   return (
     <div className="space-y-3">
       <ProcessBadge unitKey="TransportadorCorreia01" />
-
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <ProcessBadge unitKey="MoinhoMarteloM1" />
         <ProcessBadge unitKey="MoinhoMarteloM2" />
       </div>
-
       <ProcessBadge unitKey="ValvulaRotativa01" />
       <ProcessBadge unitKey="TransportadorCorreia02" />
       <ProcessBadge unitKey="PeneiraVibratoria01" />
-
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         <ProcessBadge unitKey="TransportadorCorreia03" />
         <ProcessBadge unitKey="TransportadorCorreia04" />
@@ -809,8 +847,6 @@ function VisualList() {
     </div>
   );
 }
-
-/* ======================= UI: Grupo + On/Off ======================= */
 
 function GroupControlsBox() {
   const { groupMode, actions, timers } = useSystem();
@@ -898,8 +934,6 @@ function GroupControlsBox() {
   );
 }
 
-/* ======================= Painel Principal ======================= */
-
 export default function IndustrialFlowPanel() {
   return (
     <SystemProvider>
@@ -908,7 +942,6 @@ export default function IndustrialFlowPanel() {
           <header className="mb-6">
             <h1 className="text-2xl md:text-3xl font-bold tracking-tight text-black">Fluxo da Moagem</h1>
             <p className="text-slate-700 mt-1">Simulação de um fluxo industrial usando React com TypeScript.</p>
-
             <div className="grid grid-cols-1 gap-3 mt-3">
               <GroupControlsBox />
             </div>
