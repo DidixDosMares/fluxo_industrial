@@ -417,9 +417,6 @@ function createActions(
     if (groupMode !== GROUP_MODE.AUTO) return;
     if (hasActiveTimers()) return;
 
-    const anyOn = ORDER.some((k) => state[k] === MODE.MANUAL);
-    if (!anyOn) return;
-
     setShutdownRun(false);
     setStartupRun(true);
 
@@ -429,7 +426,9 @@ function createActions(
     });
 
     if (toSchedule.length) {
-      setTimers(Object.fromEntries(withMillPair(toSchedule).map((k) => [k, TIMER_SECONDS])) as TimersRecord);
+      setTimers(
+        Object.fromEntries(withMillPair(toSchedule).map((k) => [k, TIMER_SECONDS])) as TimersRecord
+      );
     } else {
       setTimers({});
     }
