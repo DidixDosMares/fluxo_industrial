@@ -79,16 +79,24 @@ const makeInitialManual = (): ManualRecord =>
 
 const isGroupMode = (v: unknown): v is GroupMode => v === "auto" || v === "manu";
 const isBoolean = (v: unknown): v is boolean => typeof v === "boolean";
-const isStateRecord = (v: unknown): v is StateRecord =>
-  typeof v === "object" &&
-  v != null &&
-  ORDER.every(
-    (k) => (v as any)[k] === "off" || (v as any)[k] === "manual" || (v as any)[k] === "defect"
-  );
-const isPulses = (v: unknown): v is PulsesRecord =>
-  typeof v === "object" && v != null && ORDER.every((k) => typeof (v as any)[k] === "boolean");
-const isManual = (v: unknown): v is ManualRecord =>
-  typeof v === "object" && v != null && ORDER.every((k) => typeof (v as any)[k] === "boolean");
+
+const isStateRecord = (v: unknown): v is StateRecord => {
+  if (!v || typeof v !== "object") return false;
+  const rec = v as Record<string, unknown>;
+  return ORDER.every((k) => rec[k] === MODE.OFF || rec[k] === MODE.MANUAL || rec[k] === MODE.DEFECT);
+};
+
+const isPulses = (v: unknown): v is PulsesRecord => {
+  if (!v || typeof v !== "object") return false;
+  const rec = v as Record<string, unknown>;
+  return ORDER.every((k) => typeof rec[k] === "boolean");
+};
+
+const isManual = (v: unknown): v is ManualRecord => {
+  if (!v || typeof v !== "object") return false;
+  const rec = v as Record<string, unknown>;
+  return ORDER.every((k) => typeof rec[k] === "boolean");
+};
 
 function useSavedState<T>(key: string, initial: T, validate?: (v: unknown) => v is T) {
   const [hydrated, setHydrated] = useState(false);
@@ -98,13 +106,13 @@ function useSavedState<T>(key: string, initial: T, validate?: (v: unknown) => v 
     try {
       const raw = localStorage.getItem(key);
       if (raw != null) {
-        const parsed = JSON.parse(raw);
+        const parsed: unknown = JSON.parse(raw);
         if (!validate || validate(parsed)) setVal(parsed as T);
         else localStorage.removeItem(key);
       }
     } catch {}
     setHydrated(true);
-  }, [key]);
+  }, [key, validate]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -584,7 +592,7 @@ function useInterlocksAndCascades(
               return np;
             });
             setManualOn((m) => {
-              const nm = { ...(m as any) };
+              const nm: ManualRecord = { ...m };
               for (const k of expiredAll) nm[k] = false;
               return nm;
             });
@@ -625,7 +633,7 @@ function useInterlocksAndCascades(
               return np;
             });
             setManualOn((m) => {
-              const nm = { ...(m as any) };
+              const nm: ManualRecord = { ...m };
               for (const k of promoted) nm[k] = false;
               return nm;
             });
